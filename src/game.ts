@@ -737,6 +737,8 @@ export class Game {
     angularVelocity: number;
     impulse: { x: number; y: number };
     kind: ClusterKind;
+    scale?: number;
+    lifetime?: number;
   }): void {
     const d = DebrisHex.spawn({ ...opts, hexSize: this.hexSize });
     this.debris.push(d);
@@ -826,23 +828,25 @@ export class Game {
   }
 
   private handleCoinContact(cluster: FallingCluster): void {
-    // Coin pickup: +5 score, coin sparkles into debris, no other side
-    // effects. Doesn't trigger the slow-mo buffer or affect the combo.
+    // Coin pickup: +5 score, burst of six tiny coin-coloured shards
+    // radiating outward then fading fast — visually unambiguous so the
+    // player knows it was collected (and not just dropped onto them).
     this.score += COIN_SCORE_BONUS;
     this.scoreEl.textContent = String(this.score);
-    const allParts = cluster.partWorldPositions();
-    for (const p of allParts) {
+    const center = cluster.body.position;
+    for (let i = 0; i < 6; i++) {
+      const a = (i / 6) * Math.PI * 2 + Math.random() * 0.15;
+      const speed = 5 + Math.random() * 2.5;
       this.spawnDebris({
-        x: p.x,
-        y: p.y,
-        angle: p.angle,
-        velocity: cluster.body.velocity,
-        angularVelocity: cluster.body.angularVelocity,
-        impulse: {
-          x: (Math.random() - 0.5) * 5,
-          y: -2 - Math.random() * 3,
-        },
-        kind: cluster.kind,
+        x: center.x,
+        y: center.y,
+        angle: a,
+        velocity: { x: 0, y: 0 },
+        angularVelocity: (Math.random() - 0.5) * 6,
+        impulse: { x: Math.cos(a) * speed, y: Math.sin(a) * speed },
+        kind: "coin",
+        scale: 0.32,
+        lifetime: 0.55,
       });
     }
     cluster.alive = false;
