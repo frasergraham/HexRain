@@ -2,9 +2,9 @@ import { Composite, Engine, Events, type IEventCollision } from "matter-js";
 import { FallingCluster, pickShape } from "./cluster";
 import { DebrisHex } from "./debris";
 import { SQRT3 } from "./hex";
-import { bindInput, isTouchDevice } from "./input";
+import { bindInput, bindRotatePad, bindSlider, isTouchDevice } from "./input";
 import { Player } from "./player";
-import type { ClusterKind, GameState, InputAction } from "./types";
+import type { ClusterKind, GameState, InputAction, Shape } from "./types";
 
 const HEX_SIZE_BASE = 22;
 const BOARD_COLS = 9;
@@ -26,7 +26,12 @@ const STICKY_SPAWN_CHANCE = 0.12;
 const STICKY_MIN_SCORE = 3;
 
 const PLAYER_MOVE_SPEED = 5.5; // px/ms (Matter velocity units)
-const PLAYER_ROT_SPEED = 0.05; // rad/ms
+const PLAYER_ROT_SPEED = 0.05; // rad/ms (keyboard hold)
+const PLAYER_TARGET_ROT_GAIN = 0.18; // P-controller gain for touch rotation
+const PLAYER_TARGET_ROT_MAX = 0.18; // cap on touch-driven angular velocity
+const PLAYER_SLIDE_GAIN = 0.4; // P-controller gain for slider movement
+const PLAYER_SLIDE_MAX = 8; // cap on slider-driven horizontal velocity
+const RAIL_BOTTOM_INSET = 4; // px above the board bottom where the rail sits
 
 // Collision categories.
 const CAT_PLAYER = 0x0002;
@@ -61,6 +66,18 @@ export class Game {
   private clusterByBodyId = new Map<number, FallingCluster>();
   private pendingContacts: Array<{ cluster: FallingCluster; contact: ContactInfo }> = [];
   private player!: Player;
+  // World-frame target angle from the touch rotation pad. Null = no target,
+  // leave rotation to physics + keyboard hold.
+  private rotationTarget: number | null = null;
+  // Touch slider value [-1..1]. Null = inactive (fall back to keyboard).
+  private slideTarget: number | null = null;
+
+  // Wave/calm cycle. During waves spawns are faster + more varied; during
+  // calm there's a breather. One column is kept clear of new spawns while
+  // a wave is active so the player always has a safe lane to dodge into.
+  private wavePhase: "calm" | "wave" = "calm";
+  private wavePhaseTimer = 0;
+  private safeColumn = 0;
 
   private hexSize = HEX_SIZE_BASE;
   private boardWidth = 0;
@@ -124,6 +141,43 @@ export class Game {
       this.onInput(action, pressed),
     );
 
+    const rotatePadEl = this.touchbar.querySelector<HTMLElement>("#rotatepad");
+    const rotateKnobEl = this.touchbar.querySelector<HTMLElement>("#rotateknob");
+    const movePadEl = this.touchbar.querySelector<HTMLElement>("#movepad");
+    const moveKnobEl = this.touchbar.querySelector<HTMLElement>("#moveknob");
+
+    const extraUnbinds: Array<() => void> = [];
+
+    if (rotatePadEl && rotateKnobEl) {
+      extraUnbinds.push(
+        bindRotatePad(rotatePadEl, rotateKnobEl, (angle) => {
+          this.rotationTarget = angle;
+          if (angle !== null) {
+            this.holds.rotateCw.active = false;
+            this.holds.rotateCcw.active = false;
+          }
+        }),
+      );
+    }
+    if (movePadEl && moveKnobEl) {
+      extraUnbinds.push(
+        bindSlider(movePadEl, moveKnobEl, (value) => {
+          this.slideTarget = value;
+          if (value !== null) {
+            this.holds.left.active = false;
+            this.holds.right.active = false;
+          }
+        }),
+      );
+    }
+    if (extraUnbinds.length > 0) {
+      const baseUnbind = this.unbindInput;
+      this.unbindInput = () => {
+        baseUnbind?.();
+        for (const u of extraUnbinds) u();
+      };
+    }
+
     this.overlay.addEventListener("click", () => {
       if (this.state === "paused") {
         this.state = "playing";
@@ -167,6 +221,10 @@ export class Game {
     this.score = 0;
     this.comboHits = 0;
     this.spawnTimer = 0;
+    this.wavePhase = "calm";
+    this.wavePhaseTimer = 0;
+    this.rotationTarget = null;
+    this.slideTarget = null;
 
     this.player = new Player({
       centerX: this.boardOriginX + this.boardWidth / 2,
@@ -240,14 +298,34 @@ export class Game {
     }
 
     // Player input → physics velocities.
-    const wantLeft = this.holds.left.active;
-    const wantRight = this.holds.right.active;
-    let vx = 0;
-    if (wantLeft && !wantRight) vx = -PLAYER_MOVE_SPEED;
-    else if (wantRight && !wantLeft) vx = PLAYER_MOVE_SPEED;
-    this.player.setHorizontalVelocity(vx);
+    if (this.slideTarget !== null) {
+      // Map slider value to a target x within the play area, then drive the
+      // player's CoM toward it with a capped P controller. This gives the
+      // 1:1-ish feel of a touch slider while still going through the engine.
+      const usableHalfWidth = this.boardWidth / 2 - this.hexSize * 0.5;
+      const targetX =
+        this.boardOriginX + this.boardWidth / 2 + this.slideTarget * usableHalfWidth;
+      const diff = targetX - this.player.body.position.x;
+      let vx = diff * PLAYER_SLIDE_GAIN;
+      if (vx > PLAYER_SLIDE_MAX) vx = PLAYER_SLIDE_MAX;
+      else if (vx < -PLAYER_SLIDE_MAX) vx = -PLAYER_SLIDE_MAX;
+      this.player.setHorizontalVelocity(vx);
+    } else {
+      const wantLeft = this.holds.left.active;
+      const wantRight = this.holds.right.active;
+      let vx = 0;
+      if (wantLeft && !wantRight) vx = -PLAYER_MOVE_SPEED;
+      else if (wantRight && !wantLeft) vx = PLAYER_MOVE_SPEED;
+      this.player.setHorizontalVelocity(vx);
+    }
 
-    if (this.holds.rotateCw.active && !this.holds.rotateCcw.active) {
+    if (this.rotationTarget !== null) {
+      this.player.driveToAngle(
+        this.rotationTarget,
+        PLAYER_TARGET_ROT_GAIN,
+        PLAYER_TARGET_ROT_MAX,
+      );
+    } else if (this.holds.rotateCw.active && !this.holds.rotateCcw.active) {
       this.player.setAngularVelocity(PLAYER_ROT_SPEED);
     } else if (this.holds.rotateCcw.active && !this.holds.rotateCw.active) {
       this.player.setAngularVelocity(-PLAYER_ROT_SPEED);
@@ -255,26 +333,25 @@ export class Game {
 
     this.player.inDanger = this.player.size() >= DANGER_SIZE;
 
+    // Wave/calm phase progression.
+    this.advanceWavePhase(dt);
+
     // Spawn.
     this.spawnTimer -= dt;
     if (this.spawnTimer <= 0) {
       this.spawnCluster();
-      const interval = Math.max(
-        SPAWN_INTERVAL_MIN,
-        SPAWN_INTERVAL_START - this.score * SPAWN_INTERVAL_RAMP,
-      );
-      this.spawnTimer = interval;
+      this.spawnTimer = this.currentSpawnInterval();
     }
 
     // Step physics.
     Engine.update(this.engine, Math.min(dt * 1000, 1000 / 30));
 
-    // Constrain player y to the rail.
-    this.player.clampY();
-    const margin = this.hexSize * (this.player.size() === 1 ? 1 : 2);
-    this.player.clampX(
-      this.boardOriginX + margin,
-      this.boardOriginX + this.boardWidth - margin,
+    // Constrain player to the rail using bounds, so the rotated/grown blob
+    // never extends past the board bottom.
+    this.player.clampToRail(this.playerY);
+    this.player.clampBoundsX(
+      this.boardOriginX,
+      this.boardOriginX + this.boardWidth,
     );
 
     this.player.update(dt);
@@ -284,12 +361,13 @@ export class Game {
       this.handlePendingContacts();
     }
 
-    // Score on pass + cleanup.
-    const screenBottom = this.boardOriginY + this.boardHeight + this.hexSize * 4;
+    // Score on pass + cleanup. Bodies are despawned shortly after they exit
+    // the board area; clip masking in render() hides them in the meantime.
+    const screenBottom = this.boardOriginY + this.boardHeight + this.hexSize;
     for (const c of this.clusters) {
       if (!c.alive) continue;
       const bounds = c.body.bounds;
-      if (!c.scored && !c.contacted && bounds.min.y > this.playerY + this.hexSize * 1.2) {
+      if (!c.scored && !c.contacted && bounds.min.y > this.playerY + this.hexSize * 0.3) {
         c.scored = true;
         this.score += 1;
         this.comboHits = 0;
@@ -465,16 +543,16 @@ export class Game {
       kind = "sticky";
     }
 
-    const half = Math.floor(BOARD_COLS / 2);
-    const colStep = Math.floor(Math.random() * (half * 2 + 1)) - half;
+    const colStep = this.pickSpawnColumn(shape);
+    if (colStep === null) {
+      // No valid spawn this tick (would block the safe lane). Skip.
+      return;
+    }
     const colWidth = SQRT3 * this.hexSize;
     const x = this.boardOriginX + this.boardWidth / 2 + colStep * colWidth;
     const y = this.boardOriginY - this.hexSize * 4;
 
-    const speed = Math.min(
-      MAX_FALL_SPEED,
-      BASE_FALL_SPEED + this.score * SPEED_RAMP,
-    );
+    const speed = this.computeFallSpeed();
     const spin = (Math.random() - 0.5) * 0.08;
 
     const cluster = FallingCluster.spawn({
@@ -499,6 +577,103 @@ export class Game {
     this.clusterByBodyId.set(cluster.body.id, cluster);
     Composite.add(this.engine.world, cluster.body);
   }
+
+  // ----- Wave / difficulty system -----
+
+  private waveParams() {
+    const s = this.score;
+    return {
+      // Wave grows from short to long with score.
+      waveDuration: Math.min(8, 2.2 + s * 0.06),
+      // Calm shrinks but never below 2.5s, so player always gets a breather.
+      calmDuration: Math.max(2.5, 7 - s * 0.07),
+      // Wave spawn cadence: faster than calm, scales with score.
+      waveSpawnInterval: Math.max(0.32, 0.55 - s * 0.005),
+      // Calm spawn cadence: existing curve.
+      calmSpawnInterval: Math.max(
+        SPAWN_INTERVAL_MIN,
+        SPAWN_INTERVAL_START - s * SPAWN_INTERVAL_RAMP,
+      ),
+      // Wave fall speed multiplier on top of base.
+      waveSpeedMul: Math.min(2.5, 1.5 + s * 0.015),
+    };
+  }
+
+  private currentSpawnInterval(): number {
+    const p = this.waveParams();
+    return this.wavePhase === "wave" ? p.waveSpawnInterval : p.calmSpawnInterval;
+  }
+
+  private computeFallSpeed(): number {
+    const base = Math.min(
+      MAX_FALL_SPEED,
+      BASE_FALL_SPEED + this.score * SPEED_RAMP,
+    );
+    if (this.wavePhase === "wave") {
+      // Each cluster picks its own speed within ±30% of the wave-multiplier
+      // baseline so the wave feels chaotic rather than uniform.
+      const variance = 0.7 + Math.random() * 0.6;
+      return Math.min(MAX_FALL_SPEED * 1.6, base * this.waveParams().waveSpeedMul * variance);
+    }
+    return base;
+  }
+
+  private advanceWavePhase(dt: number): void {
+    this.wavePhaseTimer += dt;
+    const p = this.waveParams();
+    if (this.wavePhase === "calm" && this.wavePhaseTimer >= p.calmDuration) {
+      this.startWave();
+    } else if (this.wavePhase === "wave" && this.wavePhaseTimer >= p.waveDuration) {
+      this.startCalm();
+    }
+  }
+
+  private startWave(): void {
+    this.wavePhase = "wave";
+    this.wavePhaseTimer = 0;
+    // Pick a fresh safe column for this wave so the player can always find a
+    // lane that won't be blocked.
+    const half = Math.floor(BOARD_COLS / 2);
+    this.safeColumn = Math.floor(Math.random() * (half * 2 + 1)) - half;
+  }
+
+  private startCalm(): void {
+    this.wavePhase = "calm";
+    this.wavePhaseTimer = 0;
+  }
+
+  private shapeColumnFootprint(shape: Shape): { min: number; max: number } {
+    let minC = Infinity;
+    let maxC = -Infinity;
+    for (const c of shape) {
+      // Pointy-top: a cell's column index is q + r/2 (rounded).
+      const col = Math.round(c.q + c.r / 2);
+      if (col < minC) minC = col;
+      if (col > maxC) maxC = col;
+    }
+    return { min: minC, max: maxC };
+  }
+
+  private pickSpawnColumn(shape: Shape): number | null {
+    const half = Math.floor(BOARD_COLS / 2);
+    const fp = this.shapeColumnFootprint(shape);
+    const all: number[] = [];
+    for (let c = -half; c <= half; c++) all.push(c);
+
+    const valid =
+      this.wavePhase === "wave"
+        ? all.filter((colStep) => {
+            const lo = colStep + fp.min;
+            const hi = colStep + fp.max;
+            return this.safeColumn < lo || this.safeColumn > hi;
+          })
+        : all;
+
+    if (valid.length === 0) return null;
+    return valid[Math.floor(Math.random() * valid.length)]!;
+  }
+
+  // ----- end wave system -----
 
   private endGame(): void {
     this.state = "gameover";
@@ -534,12 +709,15 @@ export class Game {
     this.boardHeight = boardH;
     this.boardOriginX = (cssW - boardW) / 2;
     this.boardOriginY = (cssH - boardH) / 2;
-    this.playerY = this.boardOriginY + boardH - this.hexSize * 1.5;
+    // playerY is now the rail Y — the line on which the player's lowest
+    // pixel sits. Sub a small inset so it doesn't touch the very bottom.
+    this.playerY = this.boardOriginY + boardH - RAIL_BOTTOM_INSET;
 
-    // Re-center / re-size the player after layout.
+    // Re-center / re-size the player after layout. setCenter places the CoM
+    // at this y; the next clampToRail in the update loop will pull it up so
+    // the bounds touch the rail.
     this.player.setHexSize(this.hexSize);
-    this.player.setCenter(this.boardOriginX + this.boardWidth / 2, this.playerY);
-    this.player.setPlayerY(this.playerY);
+    this.player.setCenter(this.boardOriginX + this.boardWidth / 2, this.playerY - this.hexSize);
   }
 
   private render(dt: number): void {
@@ -552,16 +730,27 @@ export class Game {
     ctx.fillRect(this.boardOriginX, this.boardOriginY, this.boardWidth, this.boardHeight);
 
     // Bottom rail line where the player sits.
-    ctx.strokeStyle = "rgba(180, 200, 255, 0.08)";
+    ctx.strokeStyle = "rgba(180, 200, 255, 0.1)";
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(this.boardOriginX, this.playerY + this.hexSize * 1.1);
-    ctx.lineTo(this.boardOriginX + this.boardWidth, this.playerY + this.hexSize * 1.1);
+    ctx.moveTo(this.boardOriginX, this.playerY + 1);
+    ctx.lineTo(this.boardOriginX + this.boardWidth, this.playerY + 1);
     ctx.stroke();
 
-    // Debris underneath clusters/player so they fade into the background.
+    // Clip falling clusters and debris to the board area so nothing renders
+    // in the margins after a piece falls past the bottom.
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(this.boardOriginX, this.boardOriginY, this.boardWidth, this.boardHeight);
+    ctx.clip();
+
     for (const d of this.debris) d.draw(ctx, this.hexSize);
     for (const c of this.clusters) c.draw(ctx, this.hexSize, dt);
+
+    ctx.restore();
+
+    // Player draws unclipped — it is clamped to the board area, so this is a
+    // safety net rather than a true visibility risk.
     this.player.draw(ctx);
   }
 }

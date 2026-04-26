@@ -8,8 +8,8 @@
     />
     <meta name="theme-color" content="#0d0f1c" />
     <title>Hexfall</title>
-    <script type="module" crossorigin src="/Hexfall/assets/index-CKGXs_th.js"></script>
-    <link rel="stylesheet" crossorigin href="/Hexfall/assets/index-Df4fRKGw.css">
+    <script type="module" crossorigin src="/Hexfall/assets/index-DnlYEW9Z.js"></script>
+    <link rel="stylesheet" crossorigin href="/Hexfall/assets/index-CsZlRx3n.css">
   </head>
   <body>
     <div id="app">
@@ -40,10 +40,30 @@
       </main>
 
       <nav id="touchbar" class="touchbar" aria-hidden="true">
-        <button class="tbtn" data-action="left" aria-label="Move left">&#9664;</button>
-        <button class="tbtn" data-action="rotateCcw" aria-label="Rotate counter-clockwise">&#8634;</button>
-        <button class="tbtn" data-action="rotateCw" aria-label="Rotate clockwise">&#8635;</button>
-        <button class="tbtn" data-action="right" aria-label="Move right">&#9654;</button>
+        <div
+          id="rotatepad"
+          class="rotatepad"
+          role="slider"
+          aria-label="Rotate (touch and drag)"
+          aria-valuemin="-180"
+          aria-valuemax="180"
+          aria-valuenow="0"
+        >
+          <div class="rotatepad-ring"></div>
+          <div id="rotateknob" class="rotateknob"></div>
+        </div>
+        <div
+          id="movepad"
+          class="movepad"
+          role="slider"
+          aria-label="Move (touch and slide)"
+          aria-valuemin="-1"
+          aria-valuemax="1"
+          aria-valuenow="0"
+        >
+          <div class="movepad-track"></div>
+          <div id="moveknob" class="moveknob"></div>
+        </div>
       </nav>
     </div>
 

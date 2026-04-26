@@ -91,14 +91,12 @@ export class Player {
 
   private hexSize: number;
   private engine: Engine;
-  private playerY: number;
   private collisionCategory: number;
   private collisionMask: number;
 
   constructor(opts: PlayerOpts) {
     this.hexSize = opts.hexSize;
     this.engine = opts.engine;
-    this.playerY = opts.centerY;
     this.collisionCategory = opts.collisionCategory;
     this.collisionMask = opts.collisionMask;
     const built = buildPlayerBody(
@@ -126,33 +124,45 @@ export class Player {
   }
 
   setCenter(x: number, y: number): void {
-    this.playerY = y;
     Body.setPosition(this.body, { x, y });
     Body.setVelocity(this.body, { x: 0, y: 0 });
     Body.setAngularVelocity(this.body, 0);
     Body.setAngle(this.body, 0);
   }
 
-  setPlayerY(y: number): void {
-    this.playerY = y;
-  }
-
-  clampY(): void {
-    if (this.body.position.y !== this.playerY || this.body.velocity.y !== 0) {
-      Body.setPosition(this.body, { x: this.body.position.x, y: this.playerY });
+  // Keep the player's lowest pixel pinned to the rail (railY). The bounds-
+  // based offset means the rotated/grown blob never extends past the rail,
+  // and the CoM bobs as the blob rotates so the bottommost hex always
+  // touches it.
+  clampToRail(railY: number): void {
+    const offset = railY - this.body.bounds.max.y;
+    if (offset !== 0) {
+      Body.setPosition(this.body, {
+        x: this.body.position.x,
+        y: this.body.position.y + offset,
+      });
       Body.setVelocity(this.body, { x: this.body.velocity.x, y: 0 });
     }
   }
 
-  clampX(minX: number, maxX: number): void {
-    if (this.body.position.x < minX) {
-      Body.setPosition(this.body, { x: minX, y: this.body.position.y });
+  // Keep the full bounds of the body within [minX, maxX].
+  clampBoundsX(minX: number, maxX: number): void {
+    const overshootLeft = minX - this.body.bounds.min.x;
+    const overshootRight = this.body.bounds.max.x - maxX;
+    if (overshootLeft > 0) {
+      Body.setPosition(this.body, {
+        x: this.body.position.x + overshootLeft,
+        y: this.body.position.y,
+      });
       Body.setVelocity(this.body, {
         x: Math.max(0, this.body.velocity.x),
         y: this.body.velocity.y,
       });
-    } else if (this.body.position.x > maxX) {
-      Body.setPosition(this.body, { x: maxX, y: this.body.position.y });
+    } else if (overshootRight > 0) {
+      Body.setPosition(this.body, {
+        x: this.body.position.x - overshootRight,
+        y: this.body.position.y,
+      });
       Body.setVelocity(this.body, {
         x: Math.min(0, this.body.velocity.x),
         y: this.body.velocity.y,
@@ -166,6 +176,20 @@ export class Player {
 
   setAngularVelocity(av: number): void {
     Body.setAngularVelocity(this.body, av);
+  }
+
+  // Drive the player's rotation toward the given world-frame angle using a
+  // capped P controller. Returns the angular velocity that was applied.
+  driveToAngle(targetAngle: number, gain: number, maxSpeed: number): number {
+    const diff = Math.atan2(
+      Math.sin(targetAngle - this.body.angle),
+      Math.cos(targetAngle - this.body.angle),
+    );
+    let vel = diff * gain;
+    if (vel > maxSpeed) vel = maxSpeed;
+    else if (vel < -maxSpeed) vel = -maxSpeed;
+    Body.setAngularVelocity(this.body, vel);
+    return vel;
   }
 
   cellWorldCenter(cell: Axial): { x: number; y: number } {

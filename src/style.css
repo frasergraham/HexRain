@@ -130,8 +130,10 @@ body {
 
 .touchbar {
   display: none;
-  gap: 8px;
-  padding: 10px 12px max(10px, env(safe-area-inset-bottom));
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px max(12px, env(safe-area-inset-bottom));
   background: #0d0f1c;
 }
 
@@ -139,14 +141,97 @@ body {
   display: flex;
 }
 
+/* --- Rotation pad (left thumb) --- */
+
+.rotatepad {
+  position: relative;
+  width: 130px;
+  height: 130px;
+  flex-shrink: 0;
+  background: #1f2440;
+  border-radius: 50%;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.rotatepad-ring {
+  position: absolute;
+  inset: 8px;
+  border-radius: 50%;
+  border: 2px dashed rgba(155, 240, 194, 0.25);
+  pointer-events: none;
+}
+
+.rotateknob {
+  position: absolute;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: #2ec27a;
+  border: 2px solid #9bf0c2;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+  /* Default position: top center of the pad. Updated via JS on touch. */
+  top: 6px;
+  left: calc(50% - 15px);
+  pointer-events: none;
+  transition: background 80ms;
+}
+
+.rotatepad.active .rotateknob {
+  background: #9bf0c2;
+}
+
+/* --- Move slider (right thumb) --- */
+
+.movepad {
+  position: relative;
+  flex: 1 1 auto;
+  height: 64px;
+  max-width: 260px;
+  background: #1f2440;
+  border-radius: 32px;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.movepad-track {
+  position: absolute;
+  top: 50%;
+  left: 16px;
+  right: 16px;
+  height: 4px;
+  margin-top: -2px;
+  background: rgba(170, 196, 255, 0.18);
+  border-radius: 2px;
+  pointer-events: none;
+}
+
+.moveknob {
+  position: absolute;
+  top: 8px;
+  left: calc(50% - 24px);
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: #5b8bff;
+  border: 2px solid #aac4ff;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+  transition: background 80ms;
+}
+
+.movepad.active .moveknob {
+  background: #aac4ff;
+}
+
 .tbtn {
-  flex: 1;
-  min-height: 56px;
-  font-size: 22px;
+  font-size: 26px;
   background: #1f2440;
   border: 1px solid #2a3057;
   color: #e8ecff;
-  border-radius: 12px;
+  border-radius: 16px;
   cursor: pointer;
   touch-action: manipulation;
   transition: background 80ms;
