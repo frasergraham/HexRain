@@ -397,6 +397,10 @@ export class Game {
     this.unbindInput?.();
   }
 
+  // True if the current run started above zero (i.e. via a debug button),
+  // in which case the high score should NOT be banked at game over.
+  private debugRun = false;
+
   private startOrRestart(initialScore = 0): void {
     // Tear down all existing physics bodies.
     for (const c of this.clusters) Composite.remove(this.engine.world, c.body);
@@ -409,6 +413,7 @@ export class Game {
     this.pendingContacts = [];
 
     this.score = initialScore;
+    this.debugRun = initialScore > 0;
     this.comboHits = 0;
     this.spawnTimer = 0;
     this.wavePhase = "calm";
@@ -1852,7 +1857,9 @@ export class Game {
 
   private endGame(): void {
     this.state = "gameover";
-    if (this.score > this.best) {
+    // Don't bank a new high score for runs that started above 0 — those
+    // are debug "skip-ahead" runs and the score isn't earned cleanly.
+    if (!this.debugRun && this.score > this.best) {
       this.best = this.score;
       localStorage.setItem("hexfall.highScore", String(this.best));
       this.bestEl.textContent = String(this.best);
