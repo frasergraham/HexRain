@@ -1,5 +1,5 @@
 import { Body, Composite, Engine, Events, type IEventCollision } from "matter-js";
-import { COIN_SHAPE, FallingCluster, kindLabel, pickShape } from "./cluster";
+import { COIN_SHAPE, FallingCluster, hintPalette, kindLabel, pickShape } from "./cluster";
 import { DebrisHex } from "./debris";
 import { SQRT3 } from "./hex";
 import { bindInput, bindRotatePad, bindSlider, isTouchDevice } from "./input";
@@ -70,8 +70,27 @@ interface Star {
   a: number;
 }
 
+interface CharBoom {
+  vx: number;
+  vy: number;
+  rot: number;
+  spin: number;
+}
+
+interface Hint {
+  text: string;
+  kind: ClusterKind;
+  sourceBodyId: number;
+  state: "fadeIn" | "showing" | "exploding";
+  stateTime: number;
+  charBoom: CharBoom[];
+}
+
 const PARALLAX_BACK = 8; // px max shift of the back plane
 const PARALLAX_FRONT = 22; // px max shift of the front plane
+
+const HINT_FADE_IN = 0.45; // seconds
+const HINT_EXPLODE = 1.0; // seconds for the explosion + fade-out
 
 export class Game {
   private canvas: HTMLCanvasElement;
@@ -102,9 +121,12 @@ export class Game {
   private slideTarget: number | null = null;
 
   // Cluster kinds the player has seen at least once this run. The first
-  // spawn of any new kind is decorated with a glowing hint label so the
-  // player learns what to do.
+  // spawn of any new kind triggers a big on-screen hint label.
   private seenKinds = new Set<ClusterKind>();
+  // Active first-appearance hint banners, drawn ~30% from the top of the
+  // play area. They fade in, hold while the source cluster is alive, then
+  // explode (per-character scatter) once it leaves the play area.
+  private hints: Hint[] = [];
 
   // Wave/calm cycle. During waves spawns are faster + more varied; during
   // calm there's a breather. One column is kept clear of new spawns while
@@ -312,6 +334,7 @@ export class Game {
     this.timeEffectMax = 1;
     this.timeScale = 1;
     this.seenKinds.clear();
+    this.hints = [];
     this.pinch = 0;
     this.pinchTarget = 0;
     this.rotationDragActive = false;
@@ -385,7 +408,19 @@ export class Game {
   }
 
   private update(dt: number): void {
-    if (this.state !== "playing") {
+    if (this.state === "menu" || this.state === "paused") return;
+
+    // Tick the hint banner lifecycle every frame regardless of state, so
+    // the "fade-in / show / explode" animation keeps running behind the
+    // game-over overlay too.
+    this.updateHints(dt);
+
+    if (this.state === "gameover") {
+      // After death, keep stepping physics + clusters + debris so the
+      // wreckage scatters and the falling pieces continue behind the
+      // overlay. No input, no spawning, no lose-check.
+      Engine.update(this.engine, Math.min(dt * 1000, 1000 / 30));
+      this.cleanupOffscreenBodies();
       return;
     }
 
@@ -496,6 +531,150 @@ export class Game {
       Composite.remove(this.engine.world, c.body);
       this.clusterByBodyId.delete(c.body.id);
       return false;
+    });
+  }
+
+  // ----- First-appearance hint banner -----
+
+  private spawnHint(kind: ClusterKind, sourceBodyId: number): void {
+    const text = kindLabel(kind);
+    const charBoom: CharBoom[] = [];
+    for (let i = 0; i < text.length; i++) {
+      charBoom.push({
+        vx: (Math.random() - 0.5) * 380,
+        vy: -120 - Math.random() * 280,
+        rot: (Math.random() - 0.5) * 0.6,
+        spin: (Math.random() - 0.5) * 6,
+      });
+    }
+    this.hints.push({
+      text,
+      kind,
+      sourceBodyId,
+      state: "fadeIn",
+      stateTime: 0,
+      charBoom,
+    });
+  }
+
+  private updateHints(dt: number): void {
+    const screenBottom = this.boardOriginY + this.boardHeight;
+    for (const h of this.hints) {
+      h.stateTime += dt;
+      if (h.state === "fadeIn") {
+        if (h.stateTime >= HINT_FADE_IN) {
+          h.state = "showing";
+          h.stateTime = 0;
+        }
+      } else if (h.state === "showing") {
+        const cluster = this.clusterByBodyId.get(h.sourceBodyId);
+        const sourceGone =
+          !cluster || !cluster.alive || cluster.body.bounds.min.y > screenBottom;
+        if (sourceGone) {
+          h.state = "exploding";
+          h.stateTime = 0;
+        }
+      }
+    }
+    this.hints = this.hints.filter(
+      (h) => !(h.state === "exploding" && h.stateTime >= HINT_EXPLODE),
+    );
+  }
+
+  private drawHints(): void {
+    if (this.hints.length === 0) return;
+    const ctx = this.ctx;
+    const fontSize = Math.max(40, Math.round(this.hexSize * 2.6));
+    const baseX = this.boardOriginX + this.boardWidth / 2;
+    const baseY = this.boardOriginY + this.boardHeight * 0.3;
+    const lineH = fontSize * 1.2;
+
+    ctx.save();
+    ctx.font = `900 ${fontSize}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+
+    this.hints.forEach((h, idx) => {
+      const palette = hintPalette(h.kind);
+      const yCenter = baseY + idx * lineH;
+
+      let alpha = 1;
+      if (h.state === "fadeIn") {
+        alpha = Math.min(1, h.stateTime / HINT_FADE_IN);
+      } else if (h.state === "exploding") {
+        alpha = Math.max(0, 1 - h.stateTime / HINT_EXPLODE);
+      }
+
+      if (h.state === "exploding") {
+        // Per-character scatter: each letter flies along its own random
+        // velocity vector with light gravity, spinning around its centre.
+        const t = h.stateTime;
+        const widths = h.text.split("").map((c) => ctx.measureText(c).width);
+        const total = widths.reduce((s, w) => s + w, 0);
+        let cursorX = baseX - total / 2;
+        for (let i = 0; i < h.text.length; i++) {
+          const ch = h.text[i]!;
+          const w = widths[i]!;
+          const cx = cursorX + w / 2;
+          const cb = h.charBoom[i]!;
+          const dx = cb.vx * t;
+          const dy = cb.vy * t + 380 * t * t; // light gravity pulling letters down
+          const rot = cb.rot + cb.spin * t;
+          ctx.save();
+          ctx.translate(cx + dx, yCenter + dy);
+          ctx.rotate(rot);
+          ctx.globalAlpha = alpha;
+          ctx.shadowColor = palette.glow;
+          ctx.shadowBlur = 28 * alpha;
+          ctx.fillStyle = palette.fill;
+          ctx.fillText(ch, 0, 0);
+          ctx.shadowBlur = 0;
+          ctx.lineWidth = 3;
+          ctx.strokeStyle = palette.stroke;
+          ctx.strokeText(ch, 0, 0);
+          ctx.restore();
+          cursorX += w;
+        }
+      } else {
+        ctx.save();
+        ctx.globalAlpha = alpha;
+        ctx.shadowColor = palette.glow;
+        ctx.shadowBlur = 28;
+        ctx.fillStyle = palette.fill;
+        ctx.fillText(h.text, baseX, yCenter);
+        ctx.shadowBlur = 0;
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = palette.stroke;
+        ctx.strokeText(h.text, baseX, yCenter);
+        ctx.restore();
+      }
+    });
+
+    ctx.restore();
+  }
+
+  // ----- end hint banner -----
+
+  // Trim off-screen clusters and debris during the gameover dwell so the
+  // physics world doesn't accumulate dead bodies while the overlay is up.
+  private cleanupOffscreenBodies(): void {
+    const screenBottom = this.boardOriginY + this.boardHeight + this.hexSize;
+    for (const c of this.clusters) {
+      if (c.body.bounds.min.y > screenBottom) c.alive = false;
+    }
+    this.clusters = this.clusters.filter((c) => {
+      if (c.alive) return true;
+      Composite.remove(this.engine.world, c.body);
+      this.clusterByBodyId.delete(c.body.id);
+      return false;
+    });
+    this.debris = this.debris.filter((d) => {
+      const alive = d.update(0);
+      if (!alive || d.body.position.y > screenBottom) {
+        Composite.remove(this.engine.world, d.body);
+        return false;
+      }
+      return true;
     });
   }
 
@@ -854,10 +1033,11 @@ export class Game {
       cluster.body.parts[i]!.collisionFilter.mask = CAT_PLAYER | CAT_CLUSTER;
     }
 
-    // Tag the cluster with a glowing hint label the first time the player
-    // sees this kind in this run (Blue=AVOID, Red=HEAL, etc).
+    // First time the player sees this kind in this run, queue a big
+    // glowing hint banner (AVOID / HEAL / SLOW / FAST / COLLECT) tied to
+    // this cluster's body.
     if (!this.seenKinds.has(kind)) {
-      cluster.hintLabel = kindLabel(kind);
+      this.spawnHint(kind, cluster.body.id);
       this.seenKinds.add(kind);
     }
 
@@ -996,6 +1176,32 @@ export class Game {
       localStorage.setItem("hexfall.highScore", String(this.best));
       this.bestEl.textContent = String(this.best);
     }
+    // Scatter the player blob into debris so the wreckage tumbles behind the
+    // game-over screen. The player body itself is removed from the world so
+    // it doesn't keep being clamped to the rail.
+    const com = this.player.body.position;
+    for (const cell of this.player.cells.slice()) {
+      const wp = this.player.cellWorldCenter(cell);
+      const dx = wp.x - com.x;
+      const dy = wp.y - com.y;
+      const radial = Math.hypot(dx, dy);
+      const ux = radial > 0.001 ? dx / radial : (Math.random() - 0.5);
+      const uy = radial > 0.001 ? dy / radial : (Math.random() - 0.5);
+      this.spawnDebris({
+        x: wp.x,
+        y: wp.y,
+        angle: this.player.body.angle,
+        velocity: this.player.body.velocity,
+        angularVelocity: this.player.body.angularVelocity,
+        impulse: {
+          x: ux * (3 + Math.random() * 4) + (Math.random() - 0.5) * 2,
+          y: uy * (3 + Math.random() * 4) - 2 - Math.random() * 4,
+        },
+        kind: "normal",
+      });
+    }
+    Composite.remove(this.engine.world, this.player.body);
+
     this.renderGameOver();
   }
 
@@ -1107,7 +1313,14 @@ export class Game {
 
     ctx.restore();
 
-    this.player.draw(ctx);
+    // Skip drawing the player after game-over — the body has been removed
+    // from the world and replaced with debris that's already animating.
+    if (this.state !== "gameover") this.player.draw(ctx);
+
+    // Big first-appearance hint banner (AVOID / HEAL / SLOW / FAST /
+    // COLLECT). Drawn after the play-area contents so the glow lifts
+    // above falling pieces, but before the time-effect HUD.
+    this.drawHints();
 
     // Time-effect HUD: a small countdown bar at the top of the play area.
     if (this.timeEffect !== null) {

@@ -11,9 +11,6 @@ export class FallingCluster {
   contacted = false;
   alive = true;
   pulse = Math.random() * Math.PI * 2;
-  // First-appearance hint label drawn above the cluster while it falls.
-  // Set by Game when this is the first cluster of its kind in the run.
-  hintLabel: string | null = null;
 
   constructor(body: Body, kind: ClusterKind, partAxial: Map<number, Axial>) {
     this.body = body;
@@ -121,8 +118,6 @@ export class FallingCluster {
     } else if (timeEffect === "fast") {
       this.drawSpeedLines(ctx, hexSize);
     }
-
-    if (this.hintLabel) this.drawHintLabel(ctx, hexSize);
   }
 
   private drawAsCoin(ctx: CanvasRenderingContext2D, hexSize: number): void {
@@ -177,30 +172,6 @@ export class FallingCluster {
       ctx.stroke();
       ctx.restore();
     }
-  }
-
-  private drawHintLabel(ctx: CanvasRenderingContext2D, hexSize: number): void {
-    if (!this.hintLabel) return;
-    const cx = (this.body.bounds.min.x + this.body.bounds.max.x) / 2;
-    const yTop = this.body.bounds.min.y - hexSize * 0.6;
-    const palette = hintPalette(this.kind);
-
-    ctx.save();
-    ctx.font = `700 ${Math.round(hexSize * 0.85)}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
-    ctx.textAlign = "center";
-    ctx.textBaseline = "alphabetic";
-    ctx.letterSpacing = "0.18em";
-    // Glow.
-    ctx.shadowColor = palette.glow;
-    ctx.shadowBlur = 14;
-    ctx.fillStyle = palette.fill;
-    ctx.fillText(this.hintLabel, cx, yTop);
-    // Re-stroke without shadow for a crisp outline.
-    ctx.shadowBlur = 0;
-    ctx.lineWidth = 1.5;
-    ctx.strokeStyle = palette.stroke;
-    ctx.strokeText(this.hintLabel, cx, yTop);
-    ctx.restore();
   }
 
   private drawAsHex(ctx: CanvasRenderingContext2D, hexSize: number): void {
@@ -350,13 +321,13 @@ function blobPalette(kind: ClusterKind): BlobPalette {
   }
 }
 
-interface HintPalette {
+export interface HintPalette {
   fill: string;
   stroke: string;
   glow: string;
 }
 
-function hintPalette(kind: ClusterKind): HintPalette {
+export function hintPalette(kind: ClusterKind): HintPalette {
   switch (kind) {
     case "normal":
       return { fill: "#dfe8ff", stroke: "rgba(20, 30, 70, 0.85)", glow: "rgba(120, 160, 255, 0.95)" };
