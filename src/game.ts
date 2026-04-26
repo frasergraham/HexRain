@@ -31,9 +31,11 @@ const POWERUP_MIN_SCORE = 5;
 const SHIELD_SPAWN_CHANCE = 0.05;
 const SHIELD_MIN_SCORE = 200;
 const SHIELD_DURATION = 10; // seconds
-const DRONE_SPAWN_CHANCE = 0.05;
+const DRONE_SPAWN_CHANCE = 0.02; // rarer than the other power-ups
 const DRONE_MIN_SCORE = 400;
 const DRONE_DURATION = 10; // seconds
+const DRONE_SIZE_FACTOR = 0.5; // multiplier on hexSize for the drone body
+const DRONE_OSCILLATION_SPEED = 0.7; // radians/sec for the back-and-forth
 
 // Time-effect tuning.
 const SLOW_EFFECT_DURATION = 10;
@@ -91,6 +93,11 @@ interface Floater {
   glowColor: string;
   fontSize: number;
   shake: boolean;
+  // Grand mode: pop from near-zero to peakScale fast (~0.2s ease-out
+  // cubic) then hold full size while fading and drifting. Used for the
+  // fast-bonus payout to make survival feel like a real reward.
+  grand: boolean;
+  peakScale: number;
 }
 
 interface Drone {
@@ -734,12 +741,21 @@ export class Game {
     this.score += this.fastBonus;
     this.scoreEl.textContent = String(this.score);
     const p = this.fastBonusHudPos();
+    // Big celebratory pop: huge font, scale 0 → 1.6 fast, then a slow
+    // upward drift + fade so the player can really see the payout.
     this.spawnFloater(
       `+${this.fastBonus}`,
       p.x,
       p.y,
       "#c8ffd5",
       "rgba(120, 255, 170, 0.95)",
+      {
+        vy: -40,
+        lifetime: 1.8,
+        fontSize: Math.max(56, Math.round(this.hexSize * 3.2)),
+        grand: true,
+        peakScale: 1.6,
+      },
     );
     this.fastBonus = 0;
   }
@@ -790,7 +806,15 @@ export class Game {
     y: number,
     fillColor: string,
     glowColor: string,
-    opts?: { vx?: number; vy?: number; lifetime?: number; shake?: boolean },
+    opts?: {
+      vx?: number;
+      vy?: number;
+      lifetime?: number;
+      shake?: boolean;
+      fontSize?: number;
+      grand?: boolean;
+      peakScale?: number;
+    },
   ): void {
     this.floaters.push({
       text,
@@ -802,8 +826,10 @@ export class Game {
       lifetime: opts?.lifetime ?? 1.0,
       fillColor,
       glowColor,
-      fontSize: Math.max(28, Math.round(this.hexSize * 1.6)),
+      fontSize: opts?.fontSize ?? Math.max(28, Math.round(this.hexSize * 1.6)),
       shake: opts?.shake ?? false,
+      grand: opts?.grand ?? false,
+      peakScale: opts?.peakScale ?? 1.4,
     });
   }
 
@@ -815,13 +841,29 @@ export class Game {
     ctx.textBaseline = "middle";
     for (const f of this.floaters) {
       const t = f.age / f.lifetime;
-      const alpha = Math.max(0, 1 - t);
       // Drift via per-floater velocity (defaults to a 1s upward rise) plus
       // optional horizontal shake for the "lost bonus" presentation.
       const xOffset =
         f.vx * f.age + (f.shake ? Math.sin(f.age * 28) * 5 : 0);
       const yOffset = f.vy * f.age;
-      const scale = 1 + 0.4 * Math.min(1, f.age / 0.18);
+      let scale: number;
+      let alpha: number;
+      if (f.grand) {
+        // Grand: ease from 0 to peakScale over ~0.2s with ease-out cubic,
+        // then hold full size while fading + drifting up + out slowly.
+        const popDur = 0.2;
+        const popT = Math.min(1, f.age / popDur);
+        scale = f.peakScale * (1 - Math.pow(1 - popT, 3));
+        if (f.age < popDur) {
+          alpha = 1;
+        } else {
+          const fadeT = (f.age - popDur) / Math.max(0.001, f.lifetime - popDur);
+          alpha = Math.max(0, 1 - fadeT);
+        }
+      } else {
+        scale = 1 + (f.peakScale - 1) * Math.min(1, f.age / 0.18);
+        alpha = Math.max(0, 1 - t);
+      }
       ctx.font = `900 ${f.fontSize}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
       ctx.globalAlpha = alpha;
       ctx.shadowColor = f.glowColor;
@@ -1095,7 +1137,7 @@ export class Game {
   private drawDrones(): void {
     if (this.drones.length === 0) return;
     const ctx = this.ctx;
-    const droneSize = this.hexSize * 0.7;
+    const droneSize = this.hexSize * DRONE_SIZE_FACTOR;
     for (const d of this.drones) {
       const px = d.body.position.x;
       const py = d.body.position.y;
@@ -1269,7 +1311,7 @@ export class Game {
     const baseY = this.boardOriginY + this.boardHeight * 0.5;
     const centreX = this.boardOriginX + this.boardWidth / 2;
     const amplitude = this.boardWidth * 0.35;
-    const droneSize = this.hexSize * 0.7;
+    const droneSize = this.hexSize * DRONE_SIZE_FACTOR;
     const body = Bodies.polygon(centreX, baseY, 6, droneSize, {
       isStatic: true,
       isSensor: true,
@@ -1283,7 +1325,7 @@ export class Game {
       centreX,
       amplitude,
       phase: Math.random() * Math.PI * 2,
-      speed: 1.3,
+      speed: DRONE_OSCILLATION_SPEED,
       lifetime: DRONE_DURATION,
       pulse: Math.random() * Math.PI * 2,
     });
@@ -1492,6 +1534,12 @@ export class Game {
   private handlePowerupContact(cluster: FallingCluster): void {
     const center = cluster.body.position;
     if (cluster.kind === "slow") {
+      // Slow during fast = clean exit: pay out the accumulated bonus and
+      // reset the multiplier level, then activate slow.
+      if (this.timeEffect === "fast") {
+        this.awardFastBonus();
+        this.fastLevel = 0;
+      }
       this.timeEffect = "slow";
       this.timeScale = SLOW_TIMESCALE;
       this.timeEffectTimer = SLOW_EFFECT_DURATION;
