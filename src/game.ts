@@ -1,10 +1,28 @@
 import { Bodies, Body, Composite, Engine, Events, type IEventCollision } from "matter-js";
 import { COIN_SHAPE, FallingCluster, hintPalette, kindLabel, pickShape } from "./cluster";
 import { DebrisHex } from "./debris";
+import {
+  ACHIEVEMENTS,
+  type AchievementId,
+  type AchievementMeta,
+  getEarnedAchievements,
+  initGameCenter,
+  reportAchievement,
+  setAchievementListener,
+  submitScore as gcSubmitScore,
+} from "./gameCenter";
 import { SQRT3 } from "./hex";
 import { bindCanvasSlide, bindInput, bindSlider, isTouchDevice } from "./input";
 import { Player } from "./player";
 import type { ClusterKind, GameState, InputAction, Shape } from "./types";
+
+const SCORE_MILESTONES: ReadonlyArray<{ threshold: number; id: AchievementId }> = [
+  { threshold: 200, id: ACHIEVEMENTS.score200 },
+  { threshold: 400, id: ACHIEVEMENTS.score400 },
+  { threshold: 600, id: ACHIEVEMENTS.score600 },
+  { threshold: 800, id: ACHIEVEMENTS.score800 },
+  { threshold: 1000, id: ACHIEVEMENTS.score1000 },
+];
 
 const HEX_SIZE_BASE = 22;
 const BOARD_COLS = 9;
@@ -139,6 +157,10 @@ export class Game {
   private comboHits = 0;
   private spawnTimer = 0;
 
+  // Per-run achievement tracking.
+  private nextMilestoneIdx = 0;
+  private wasInDangerThisRun = false;
+
   private engine: Engine;
   private clusters: FallingCluster[] = [];
   private debris: DebrisHex[] = [];
@@ -251,7 +273,7 @@ export class Game {
     this.scoreEl = opts.scoreEl;
     this.bestEl = opts.bestEl;
 
-    this.best = Number(localStorage.getItem("hexfall.highScore") ?? 0) || 0;
+    this.best = Number(localStorage.getItem("hexrain.highScore") ?? 0) || 0;
     this.bestEl.textContent = String(this.best);
 
     this.engine = Engine.create({
@@ -353,6 +375,69 @@ export class Game {
     }
 
     this.renderMenu();
+
+    // Banner listener fires only on platforms where Game Center isn't doing
+    // its own banner (i.e. web). Banners are queued so back-to-back unlocks
+    // don't stack visually on top of each other.
+    setAchievementListener((meta) => this.queueAchievementBanner(meta));
+
+    // Fire-and-forget Game Center auth on iOS; no-op elsewhere.
+    void initGameCenter();
+  }
+
+  // Queue of metas waiting to be shown; we display one at a time.
+  private bannerQueue: AchievementMeta[] = [];
+  private bannerActive = false;
+
+  private queueAchievementBanner(meta: AchievementMeta): void {
+    this.bannerQueue.push(meta);
+    if (!this.bannerActive) this.dequeueAchievementBanner();
+  }
+
+  private dequeueAchievementBanner(): void {
+    const meta = this.bannerQueue.shift();
+    if (!meta) {
+      this.bannerActive = false;
+      return;
+    }
+    this.bannerActive = true;
+    const banner = document.createElement("div");
+    banner.className = "achievement-banner";
+    banner.style.setProperty("--banner-tint", meta.tint);
+    banner.innerHTML = `
+      <div class="achievement-banner-icon">${escapeHtml(meta.badge)}</div>
+      <div class="achievement-banner-text">
+        <span class="achievement-banner-label">Achievement</span>
+        <span class="achievement-banner-name">${escapeHtml(meta.name)}</span>
+        <span class="achievement-banner-desc">${escapeHtml(meta.description)}</span>
+      </div>
+    `;
+    document.body.appendChild(banner);
+    // Force a reflow so the transition runs from the off-screen state.
+    void banner.offsetHeight;
+    banner.classList.add("show");
+    setTimeout(() => {
+      banner.classList.remove("show");
+      setTimeout(() => {
+        banner.remove();
+        // The on-menu badge strip is recomputed live so the player sees
+        // the new earn appear without restarting.
+        this.renderAchievementBadges();
+        this.dequeueAchievementBanner();
+      }, 380);
+    }, 2800);
+  }
+
+  private renderAchievementBadges(): void {
+    const host = document.getElementById("achievementBadges");
+    if (!host) return;
+    const earned = getEarnedAchievements();
+    host.innerHTML = earned
+      .map(
+        (m) =>
+          `<span class="achievement-badge" style="--badge-tint:${m.tint}" title="${escapeHtml(m.name)} — ${escapeHtml(m.description)}">${escapeHtml(m.badge)}</span>`,
+      )
+      .join("");
   }
 
   private installDebugButtons(): void {
@@ -416,6 +501,8 @@ export class Game {
     this.debugRun = initialScore > 0;
     this.comboHits = 0;
     this.spawnTimer = 0;
+    this.nextMilestoneIdx = 0;
+    this.wasInDangerThisRun = false;
     this.wavePhase = "calm";
     this.wavePhaseTimer = 0;
     this.swarmWave = false;
@@ -457,6 +544,7 @@ export class Game {
 
   private renderMenu(): void {
     this.overlay.classList.remove("hidden");
+    this.renderAchievementBadges();
   }
 
   private renderGameOver(): void {
@@ -464,8 +552,10 @@ export class Game {
       <h1>GAME OVER</h1>
       <p class="tagline">Score ${this.score} &middot; Best ${this.best}</p>
       <p class="hint">Press <kbd>Space</kbd> or tap to play again</p>
+      <div id="achievementBadges" class="achievement-badges" aria-label="Earned achievements"></div>
     `;
     this.overlay.classList.remove("hidden");
+    this.renderAchievementBadges();
   }
 
   private onInput(action: InputAction, pressed: boolean): void {
@@ -590,7 +680,15 @@ export class Game {
     // controls always feel responsive even during slow-mo).
     this.applyMovementInput();
 
-    this.player.inDanger = this.player.size() >= DANGER_SIZE;
+    const playerSize = this.player.size();
+    this.player.inDanger = playerSize >= DANGER_SIZE;
+
+    // Survivor: was in danger and clawed back to a single hex.
+    if (playerSize >= DANGER_SIZE) this.wasInDangerThisRun = true;
+    if (this.wasInDangerThisRun && playerSize === 1) {
+      void reportAchievement(ACHIEVEMENTS.survivor);
+      this.wasInDangerThisRun = false;
+    }
 
     // Shield timer ticks in wall-clock seconds so its 10s feels real.
     if (this.shieldTimer > 0) {
@@ -645,6 +743,8 @@ export class Game {
         }
         this.comboHits = 0;
         this.scoreEl.textContent = String(this.score);
+
+        this.checkScoreMilestones();
       }
       if (bounds.min.y > screenBottom) {
         c.alive = false;
@@ -742,6 +842,7 @@ export class Game {
     if (this.fastBonus <= 0) return;
     this.score += this.fastBonus;
     this.scoreEl.textContent = String(this.score);
+    this.checkScoreMilestones();
     const p = this.fastBonusHudPos();
     // Big celebratory pop: huge font, scale 0 → 1.6 fast, then a slow
     // upward drift + fade so the player can really see the payout.
@@ -1511,6 +1612,7 @@ export class Game {
     if (this.timeEffect === "fast") {
       this.fastBonus += COIN_SCORE_BONUS * (this.fastMultiplier() - 1);
     }
+    this.checkScoreMilestones();
     const center = cluster.body.position;
     this.spawnFloater(`+${COIN_SCORE_BONUS}`, center.x, center.y, "#ffe28a", "rgba(255, 175, 70, 0.95)");
     for (let i = 0; i < 6; i++) {
@@ -1554,6 +1656,9 @@ export class Game {
       this.timeEffectTimer = FAST_EFFECT_DURATION;
       this.timeEffectMax = FAST_EFFECT_DURATION;
       const mul = this.fastMultiplier();
+      if (mul >= 5) void reportAchievement(ACHIEVEMENTS.bonus5x);
+      else if (mul >= 4) void reportAchievement(ACHIEVEMENTS.bonus4x);
+      else if (mul >= 3) void reportAchievement(ACHIEVEMENTS.bonus3x);
       this.spawnFloater(
         `${mul}X`,
         center.x,
@@ -1861,9 +1966,10 @@ export class Game {
     // are debug "skip-ahead" runs and the score isn't earned cleanly.
     if (!this.debugRun && this.score > this.best) {
       this.best = this.score;
-      localStorage.setItem("hexfall.highScore", String(this.best));
+      localStorage.setItem("hexrain.highScore", String(this.best));
       this.bestEl.textContent = String(this.best);
     }
+    void gcSubmitScore(this.score);
     // Scatter the player blob into debris so the wreckage tumbles behind the
     // game-over screen. The player body itself is removed from the world so
     // it doesn't keep being clamped to the rail.
@@ -1890,7 +1996,17 @@ export class Game {
     }
     Composite.remove(this.engine.world, this.player.body);
 
+
     this.renderGameOver();
+  }
+
+  private checkScoreMilestones(): void {
+    while (this.nextMilestoneIdx < SCORE_MILESTONES.length) {
+      const m = SCORE_MILESTONES[this.nextMilestoneIdx]!;
+      if (this.score < m.threshold) break;
+      void reportAchievement(m.id);
+      this.nextMilestoneIdx += 1;
+    }
   }
 
   private resize(): void {
@@ -2067,6 +2183,15 @@ export class Game {
       }
     }
   }
+}
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function generateStars(
