@@ -87,61 +87,70 @@ export function isTouchDevice(): boolean {
 
 // Bind tap-anywhere-on-canvas as a rotate gesture. The wheel element is
 // positioned absolutely INSIDE the canvas's offset parent (e.g. .stage).
-// On touchstart it appears centred at the finger; on touchmove the
-// callback receives the angle from the anchor (touchstart point) to the
-// current touch, and the knob is drawn on the rim at that angle. On
-// release the wheel hides and the callback fires with null.
+//
+// To avoid a "pop" on first touch, the wheel is anchored off-centre from
+// the finger so that the knob sits exactly UNDER the finger at the
+// player's current angle (provided by getInitialAngle). Subsequent
+// touchmove samples report the angle from the wheel centre to the
+// current touch, so a frame-to-frame delta lines up directly with the
+// angular distance the finger has travelled.
 export function bindCanvasWheel(
   surface: HTMLElement,
   wheel: HTMLElement,
   knob: HTMLElement,
+  getInitialAngle: () => number,
   onRotate: RotateHandler,
 ): () => void {
   let active = false;
   let activeTouchId: number | null = null;
-  let anchorX = 0;
-  let anchorY = 0;
+  let centerClientX = 0;
+  let centerClientY = 0;
 
-  // Position values are in the wheel's local coordinate space, where
-  // (left, top) is the centre because the wheel uses negative margins.
+  // The wheel CSS uses negative margins so (left, top) addresses the
+  // wheel's centre, not its top-left. The knob is the same.
   const WHEEL_RADIUS = 48; // matches CSS width/2
   const KNOB_HALF = 11;
+  const KNOB_R = WHEEL_RADIUS - KNOB_HALF; // distance from wheel centre to knob centre
 
-  const positionWheelAt = (clientX: number, clientY: number) => {
+  const positionWheelAt = (clientCX: number, clientCY: number) => {
     const rect = surface.getBoundingClientRect();
-    const localX = clientX - rect.left;
-    const localY = clientY - rect.top;
-    wheel.style.left = `${localX}px`;
-    wheel.style.top = `${localY}px`;
-    anchorX = clientX;
-    anchorY = clientY;
+    wheel.style.left = `${clientCX - rect.left}px`;
+    wheel.style.top = `${clientCY - rect.top}px`;
+    centerClientX = clientCX;
+    centerClientY = clientCY;
   };
 
-  const setKnob = (angleFromAnchor: number) => {
-    const r = WHEEL_RADIUS - KNOB_HALF;
+  const setKnob = (angleFromCenter: number) => {
     const cx = WHEEL_RADIUS;
     const cy = WHEEL_RADIUS;
-    knob.style.left = `${cx + Math.cos(angleFromAnchor) * r}px`;
-    knob.style.top = `${cy + Math.sin(angleFromAnchor) * r}px`;
+    knob.style.left = `${cx + Math.cos(angleFromCenter) * KNOB_R}px`;
+    knob.style.top = `${cy + Math.sin(angleFromCenter) * KNOB_R}px`;
   };
 
-  const computeAngle = (clientX: number, clientY: number): number => {
-    const dx = clientX - anchorX;
-    const dy = clientY - anchorY;
+  const angleAt = (clientX: number, clientY: number): number => {
+    const dx = clientX - centerClientX;
+    const dy = clientY - centerClientY;
     if (dx === 0 && dy === 0) return -Math.PI / 2;
     return Math.atan2(dy, dx);
   };
 
   const start = (clientX: number, clientY: number) => {
     active = true;
-    positionWheelAt(clientX, clientY);
-    setKnob(-Math.PI / 2); // reset knob to top of wheel
+    // Anchor so the knob — drawn at the player's current angle on the
+    // wheel rim — sits exactly under the finger. wheelCenter = touch -
+    // KNOB_R * (cos a0, sin a0).
+    const a0 = getInitialAngle();
+    positionWheelAt(
+      clientX - Math.cos(a0) * KNOB_R,
+      clientY - Math.sin(a0) * KNOB_R,
+    );
+    setKnob(a0);
     wheel.classList.add("show");
-    onRotate(computeAngle(clientX, clientY));
+    onRotate(a0);
   };
   const move = (clientX: number, clientY: number) => {
     if (!active) return;
-    const angle = computeAngle(clientX, clientY);
+    const angle = angleAt(clientX, clientY);
     setKnob(angle);
     onRotate(angle);
   };

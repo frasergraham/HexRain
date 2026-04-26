@@ -294,7 +294,7 @@ export class Game {
     // delta (iPod click-wheel feel).
     if (wheelEl && wheelKnobEl) {
       extraUnbinds.push(
-        bindCanvasWheel(this.canvas, wheelEl, wheelKnobEl, (angle) => {
+        bindCanvasWheel(this.canvas, wheelEl, wheelKnobEl, () => this.player.body.angle, (angle) => {
           if (angle === null) {
             this.rotationDragActive = false;
             this.prevRotateTouchAngle = null;
