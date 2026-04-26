@@ -144,19 +144,22 @@ export function bindRotatePad(
     resetKnob();
   };
 
+  // Use targetTouches so multi-touch (e.g. one finger on this pad and a
+  // second finger elsewhere) doesn't cross-contaminate. targetTouches only
+  // contains touches that started on this element.
   const onTouchStart = (e: TouchEvent) => {
     e.preventDefault();
-    const t = e.touches[0];
+    const t = e.targetTouches[0];
     if (t) start(t.clientX, t.clientY);
   };
   const onTouchMove = (e: TouchEvent) => {
     e.preventDefault();
-    const t = e.touches[0];
+    const t = e.targetTouches[0];
     if (t) move(t.clientX, t.clientY);
   };
   const onTouchEnd = (e: TouchEvent) => {
     e.preventDefault();
-    end();
+    if (e.targetTouches.length === 0) end();
   };
   const onMouseDown = (e: MouseEvent) => {
     e.preventDefault();
@@ -242,19 +245,21 @@ export function bindSlider(
     resetKnob();
   };
 
+  // Same multi-touch handling as the rotate pad — read targetTouches so a
+  // second finger on a sibling control can't hijack this one.
   const onTouchStart = (e: TouchEvent) => {
     e.preventDefault();
-    const t = e.touches[0];
+    const t = e.targetTouches[0];
     if (t) start(t.clientX);
   };
   const onTouchMove = (e: TouchEvent) => {
     e.preventDefault();
-    const t = e.touches[0];
+    const t = e.targetTouches[0];
     if (t) move(t.clientX);
   };
   const onTouchEnd = (e: TouchEvent) => {
     e.preventDefault();
-    end();
+    if (e.targetTouches.length === 0) end();
   };
   const onMouseDown = (e: MouseEvent) => {
     e.preventDefault();
