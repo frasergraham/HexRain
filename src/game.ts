@@ -32,9 +32,40 @@ const PLAYER_ROT_SPEED = 0.05; // rad/ms
 const CAT_PLAYER = 0x0002;
 const CAT_CLUSTER = 0x0004;
 
+// Bonus popup tuning.
+const BONUS_LIFETIME = 0.95; // seconds
+const BONUS_FONT_PX = 22;
+const BONUS_SCALE_START = 0.6;
+const BONUS_SCALE_END = 1.6;
+const BONUS_TOP_PAD = 6; // px clearance from canvas top edge
+const BONUS_STREAK_THRESHOLD = 3;
+
 interface HoldState {
   active: boolean;
 }
+
+interface BonusPopup {
+  x: number;
+  y: number;
+  text: string;
+  age: number;
+}
+
+interface AchievementDef {
+  id: string;
+  label: string;
+  short: string;
+  test: (s: { score: number; streak: number; best: number }) => boolean;
+}
+
+const ACHIEVEMENTS: AchievementDef[] = [
+  { id: "first", label: "First Drop", short: "1", test: (s) => s.score >= 1 },
+  { id: "ten", label: "Double Digits", short: "10", test: (s) => s.score >= 10 },
+  { id: "fifty", label: "Half Ton", short: "50", test: (s) => s.score >= 50 },
+  { id: "hundred", label: "Centurion", short: "100", test: (s) => s.score >= 100 },
+  { id: "streak3", label: "Combo", short: "x3", test: (s) => s.streak >= 3 },
+  { id: "streak10", label: "Hot Streak", short: "x10", test: (s) => s.streak >= 10 },
+];
 
 interface ContactInfo {
   point: { x: number; y: number };
@@ -53,7 +84,10 @@ export class Game {
   private score = 0;
   private best = 0;
   private comboHits = 0;
+  private passStreak = 0;
   private spawnTimer = 0;
+  private bonusPopups: BonusPopup[] = [];
+  private unlocked: Set<string>;
 
   private engine: Engine;
   private clusters: FallingCluster[] = [];
@@ -98,6 +132,8 @@ export class Game {
 
     this.best = Number(localStorage.getItem("hexfall.highScore") ?? 0) || 0;
     this.bestEl.textContent = String(this.best);
+
+    this.unlocked = new Set(this.loadUnlocked());
 
     this.engine = Engine.create({
       gravity: { x: 0, y: 1, scale: 0.0012 },
@@ -166,7 +202,9 @@ export class Game {
 
     this.score = 0;
     this.comboHits = 0;
+    this.passStreak = 0;
     this.spawnTimer = 0;
+    this.bonusPopups = [];
 
     this.player = new Player({
       centerX: this.boardOriginX + this.boardWidth / 2,
@@ -183,6 +221,8 @@ export class Game {
   }
 
   private renderMenu(): void {
+    const mount = this.overlay.querySelector("#achievements-mount");
+    if (mount) mount.innerHTML = this.achievementsHTML();
     this.overlay.classList.remove("hidden");
   }
 
@@ -190,9 +230,51 @@ export class Game {
     this.overlay.innerHTML = `
       <h1>GAME OVER</h1>
       <p class="tagline">Score ${this.score} &middot; Best ${this.best}</p>
-      <p class="hint">Press <kbd>Space</kbd> or tap to play again</p>
+      <p class="hint">Tap to play again</p>
+      ${this.achievementsHTML()}
     `;
     this.overlay.classList.remove("hidden");
+  }
+
+  private loadUnlocked(): string[] {
+    try {
+      const raw = localStorage.getItem("hexfall.achievements");
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed.filter((v) => typeof v === "string") : [];
+    } catch {
+      return [];
+    }
+  }
+
+  private saveUnlocked(): void {
+    localStorage.setItem("hexfall.achievements", JSON.stringify([...this.unlocked]));
+  }
+
+  private checkAchievements(): void {
+    const s = { score: this.score, streak: this.passStreak, best: this.best };
+    let changed = false;
+    for (const a of ACHIEVEMENTS) {
+      if (!this.unlocked.has(a.id) && a.test(s)) {
+        this.unlocked.add(a.id);
+        changed = true;
+      }
+    }
+    if (changed) this.saveUnlocked();
+  }
+
+  private achievementsHTML(): string {
+    const items = ACHIEVEMENTS.map((a) => {
+      const got = this.unlocked.has(a.id);
+      return `<div class="badge ${got ? "got" : "locked"}" role="img" aria-label="${a.label}${got ? " unlocked" : " locked"}">
+        <div class="badge-hex"><span class="badge-text">${a.short}</span></div>
+        <span class="badge-label">${a.label}</span>
+      </div>`;
+    }).join("");
+    return `<section class="achievements">
+      <h2>Achievements</h2>
+      <div class="badges">${items}</div>
+    </section>`;
   }
 
   private onInput(action: InputAction, pressed: boolean): void {
@@ -206,7 +288,7 @@ export class Game {
       this.state = "paused";
       this.overlay.innerHTML = `
         <h1>PAUSED</h1>
-        <p class="hint">Press <kbd>P</kbd> or tap to resume</p>
+        <p class="hint">Tap to resume</p>
       `;
       this.overlay.classList.remove("hidden");
       return;
@@ -293,12 +375,25 @@ export class Game {
         c.scored = true;
         this.score += 1;
         this.comboHits = 0;
+        this.passStreak += 1;
+        if (this.passStreak >= BONUS_STREAK_THRESHOLD) {
+          const bonus = Math.min(5, this.passStreak - (BONUS_STREAK_THRESHOLD - 1));
+          this.score += bonus;
+          this.spawnBonus(`+${bonus}`, c.body.position.x, this.playerY - this.hexSize * 1.5);
+        }
         this.scoreEl.textContent = String(this.score);
+        this.checkAchievements();
       }
       if (bounds.min.y > screenBottom) {
         c.alive = false;
       }
     }
+
+    // Age out bonus popups.
+    this.bonusPopups = this.bonusPopups.filter((p) => {
+      p.age += dt;
+      return p.age < BONUS_LIFETIME;
+    });
 
     // Update debris.
     this.debris = this.debris.filter((d) => {
@@ -362,6 +457,7 @@ export class Game {
       if (!cluster.alive) continue;
 
       this.player.invulnTimer = STICK_INVULN_MS / 1000;
+      this.passStreak = 0;
 
       if (cluster.kind === "normal") {
         this.handleNormalContact(cluster, contact);
@@ -401,6 +497,38 @@ export class Game {
     if (this.player.size() >= DANGER_SIZE && this.comboHits >= LOSE_COMBO) {
       this.endGame();
     }
+  }
+
+  private spawnBonus(text: string, x: number, y: number): void {
+    // Clamp y so the popup never overlaps the canvas top edge, even at peak scale.
+    const halfPeakHeight = (BONUS_FONT_PX * BONUS_SCALE_END) / 2;
+    const minY = halfPeakHeight + BONUS_TOP_PAD;
+    const clampedY = Math.max(minY, y);
+    this.bonusPopups.push({ x, y: clampedY, text, age: 0 });
+  }
+
+  private drawBonusPopups(): void {
+    if (this.bonusPopups.length === 0) return;
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    for (const p of this.bonusPopups) {
+      const t = Math.min(1, p.age / BONUS_LIFETIME);
+      const scale = BONUS_SCALE_START + (BONUS_SCALE_END - BONUS_SCALE_START) * t;
+      // Fade in over the first 15%, then linearly fade out.
+      const fadeIn = Math.min(1, t / 0.15);
+      const fadeOut = 1 - Math.max(0, (t - 0.15) / 0.85);
+      const alpha = Math.max(0, fadeIn * fadeOut);
+      ctx.globalAlpha = alpha;
+      ctx.font = `700 ${Math.round(BONUS_FONT_PX * scale)}px ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif`;
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = "rgba(13, 15, 28, 0.85)";
+      ctx.strokeText(p.text, p.x, p.y);
+      ctx.fillStyle = "#ffd877";
+      ctx.fillText(p.text, p.x, p.y);
+    }
+    ctx.restore();
   }
 
   private spawnDebris(opts: {
@@ -563,5 +691,6 @@ export class Game {
     for (const d of this.debris) d.draw(ctx, this.hexSize);
     for (const c of this.clusters) c.draw(ctx, this.hexSize, dt);
     this.player.draw(ctx);
+    this.drawBonusPopups();
   }
 }

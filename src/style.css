@@ -162,3 +162,84 @@ body {
     display: none;
   }
 }
+
+.achievements {
+  margin-top: 20px;
+  padding: 14px 16px 16px;
+  border: 1px solid #2a3057;
+  border-radius: 14px;
+  background: rgba(15, 18, 36, 0.55);
+  width: min(360px, 100%);
+}
+
+.achievements h2 {
+  margin: 0 0 10px;
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  color: #6f7aa6;
+  text-transform: uppercase;
+  text-align: center;
+  font-weight: 700;
+}
+
+.badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 14px;
+  justify-content: center;
+}
+
+.badge {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  width: 56px;
+  background: transparent;
+  border: 0;
+  padding: 0;
+}
+
+.badge-hex {
+  width: 48px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* Pointy-top regular hexagon */
+  clip-path: polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%);
+}
+
+.badge.got .badge-hex {
+  background: linear-gradient(160deg, #6c83ff 0%, #4a5bd6 60%, #2f3aa8 100%);
+  box-shadow: none;
+}
+
+.badge.locked .badge-hex {
+  background: #1a1d33;
+}
+
+.badge-text {
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: #fff;
+  font-variant-numeric: tabular-nums;
+}
+
+.badge.locked .badge-text {
+  color: #4a527a;
+}
+
+.badge-label {
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #b9c0e8;
+  text-align: center;
+  line-height: 1.2;
+}
+
+.badge.locked .badge-label {
+  color: #545b80;
+}
