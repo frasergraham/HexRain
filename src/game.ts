@@ -8,7 +8,6 @@ import type { ClusterKind, GameState, InputAction, Shape } from "./types";
 
 const HEX_SIZE_BASE = 22;
 const BOARD_COLS = 9;
-const BOARD_ROWS = 16;
 
 const BASE_FALL_SPEED = 1.6; // initial downward velocity for spawned clusters (px/ms)
 const SPEED_RAMP = 0.04; // px/ms per score
@@ -1144,23 +1143,20 @@ export class Game {
     this.canvas.height = Math.round(cssH * dpr);
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
+    // The play area is the full canvas — the HUD bar and the touchbar live
+    // in sibling elements above and below, so this canvas is exclusively
+    // game space. Pick hexSize so BOARD_COLS columns fit the full width
+    // exactly; height is whatever the canvas gives us.
     const colWidthFor = (size: number) => SQRT3 * size;
-    const targetSizeByWidth = (cssW - 16) / (colWidthFor(1) * BOARD_COLS);
-    const targetSizeByHeight = (cssH - 16) / (1.5 * BOARD_ROWS + 1);
-    this.hexSize = Math.max(
-      10,
-      Math.min(targetSizeByWidth, targetSizeByHeight, 32),
-    );
+    this.hexSize = Math.max(10, cssW / (colWidthFor(1) * BOARD_COLS));
 
-    const boardW = colWidthFor(this.hexSize) * BOARD_COLS;
-    const boardH = 1.5 * this.hexSize * BOARD_ROWS + this.hexSize * 0.5;
-    this.boardWidth = boardW;
-    this.boardHeight = boardH;
-    this.boardOriginX = (cssW - boardW) / 2;
-    this.boardOriginY = (cssH - boardH) / 2;
-    // playerY is now the rail Y — the line on which the player's lowest
-    // pixel sits. Sub a small inset so it doesn't touch the very bottom.
-    this.playerY = this.boardOriginY + boardH - RAIL_BOTTOM_INSET;
+    this.boardWidth = cssW;
+    this.boardHeight = cssH;
+    this.boardOriginX = 0;
+    this.boardOriginY = 0;
+    // playerY is the rail Y — the line on which the player's lowest pixel
+    // sits, just above the very bottom of the canvas.
+    this.playerY = this.boardOriginY + this.boardHeight - RAIL_BOTTOM_INSET;
 
     // Re-center / re-size the player after layout. setCenter places the CoM
     // at this y; the next clampToRail in the update loop will pull it up so
