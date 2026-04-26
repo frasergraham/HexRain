@@ -329,7 +329,36 @@ export class Game {
       }
     });
 
+    if (new URLSearchParams(window.location.search).get("debug") === "1") {
+      this.installDebugButtons();
+    }
+
     this.renderMenu();
+  }
+
+  private installDebugButtons(): void {
+    const parent = this.overlay.parentElement;
+    if (!parent) return;
+    const container = document.createElement("div");
+    container.className = "debug-buttons";
+    container.id = "debugButtons";
+    const label = document.createElement("span");
+    label.className = "debug-label";
+    label.textContent = "DEBUG · start at";
+    container.appendChild(label);
+    for (const score of [199, 399, 599]) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.textContent = String(score);
+      btn.addEventListener("click", (e) => {
+        // stopPropagation prevents the overlay's own click handler from
+        // ALSO firing and resetting the score back to 0.
+        e.stopPropagation();
+        this.startOrRestart(score);
+      });
+      container.appendChild(btn);
+    }
+    parent.appendChild(container);
   }
 
   start(): void {
@@ -349,7 +378,7 @@ export class Game {
     this.unbindInput?.();
   }
 
-  private startOrRestart(): void {
+  private startOrRestart(initialScore = 0): void {
     // Tear down all existing physics bodies.
     for (const c of this.clusters) Composite.remove(this.engine.world, c.body);
     for (const d of this.debris) Composite.remove(this.engine.world, d.body);
@@ -360,7 +389,7 @@ export class Game {
     this.clusterByBodyId.clear();
     this.pendingContacts = [];
 
-    this.score = 0;
+    this.score = initialScore;
     this.comboHits = 0;
     this.spawnTimer = 0;
     this.wavePhase = "calm";
@@ -398,7 +427,7 @@ export class Game {
 
     this.state = "playing";
     this.overlay.classList.add("hidden");
-    this.scoreEl.textContent = "0";
+    this.scoreEl.textContent = String(this.score);
   }
 
   private renderMenu(): void {
