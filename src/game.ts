@@ -70,8 +70,10 @@ interface Star {
   a: number;
 }
 
-const PARALLAX_BACK = 8; // px max shift of the back plane
-const PARALLAX_FRONT = 22; // px max shift of the front plane
+const PARALLAX_BACK = 8; // px max horizontal shift of the back plane
+const PARALLAX_FRONT = 22; // px max horizontal shift of the front plane
+const STAR_SCROLL_BACK = 6; // px/sec downward drift of the back plane
+const STAR_SCROLL_FRONT = 18; // px/sec downward drift of the front plane
 
 const HINT_TIMESCALE = 0.5; // game runs at this rate while a hint cluster is on screen
 const HINT_STORAGE_KEY = "hexfall.seenKinds";
@@ -134,9 +136,11 @@ export class Game {
   private pinchTarget = 0;
 
   // Two-plane starfield. Generated on resize, drawn behind everything with
-  // a small horizontal parallax offset based on the player's x position.
+  // a small horizontal parallax based on the player's x position and a
+  // slow downward scroll that gives a sense of moving forward.
   private starsBack: Star[] = [];
   private starsFront: Star[] = [];
+  private starScrollY = 0;
 
   private hexSize = HEX_SIZE_BASE;
   private boardWidth = 0;
@@ -392,6 +396,9 @@ export class Game {
 
   private update(dt: number): void {
     if (this.state === "menu" || this.state === "paused") return;
+
+    // Starfield drifts downward in real time during play and gameover.
+    this.starScrollY += dt;
 
     if (this.state === "gameover") {
       // After death, keep stepping physics + clusters + debris so the
@@ -713,45 +720,63 @@ export class Game {
 
   private handleStickyContact(cluster: FallingCluster, contact: ContactInfo): void {
     const allParts = cluster.partWorldPositions();
-
+    // A sticky cluster of N hexes rips off N-1 hexes from the player
+    // (floor of 1, capped at player size - 1 so we always leave at least
+    // one cell). The cells removed are the N-1 closest to the contact
+    // point, ordered by distance.
     if (this.player.size() > 1) {
-      const targetCell = this.player.findNearestCell(contact.point.x, contact.point.y);
-      if (targetCell) {
-        const wp = this.player.cellWorldCenter(targetCell);
+      const stickyCellCount = allParts.length;
+      const removalsRequested = Math.max(1, stickyCellCount - 1);
+      const removalsAllowed = Math.min(removalsRequested, this.player.size() - 1);
+
+      // Capture world positions FIRST — once removeCell rebuilds the body,
+      // any cell we haven't pulled a position for yet will report a stale
+      // location.
+      const cellsByDist = this.player.cells
+        .map((cell) => {
+          const wp = this.player.cellWorldCenter(cell);
+          const d = Math.hypot(wp.x - contact.point.x, wp.y - contact.point.y);
+          return { cell, dist: d, wp };
+        })
+        .sort((a, b) => a.dist - b.dist);
+
+      const toRemove = cellsByDist.slice(0, removalsAllowed);
+
+      for (const item of toRemove) {
         this.spawnDebris({
-          x: wp.x,
-          y: wp.y,
+          x: item.wp.x,
+          y: item.wp.y,
           angle: this.player.body.angle,
           velocity: this.player.body.velocity,
           angularVelocity: this.player.body.angularVelocity,
-          impulse: { x: (Math.random() - 0.5) * 4, y: -2 - Math.random() * 2 },
+          impulse: {
+            x: (Math.random() - 0.5) * 4,
+            y: -2 - Math.random() * 2,
+          },
           kind: "normal",
         });
-        this.player.removeCell(targetCell);
+      }
+      for (const item of toRemove) this.player.removeCell(item.cell);
 
-        // Removing the targeted cell may have split the blob into two or
-        // more disconnected pieces. Keep the largest, scatter the rest as
-        // debris that tumbles in the player's current motion frame.
-        const orphans = this.player.pruneDisconnected();
-        for (const o of orphans) {
-          this.spawnDebris({
-            x: o.worldX,
-            y: o.worldY,
-            angle: this.player.body.angle,
-            velocity: this.player.body.velocity,
-            angularVelocity: this.player.body.angularVelocity,
-            // Push outward away from the player CoM so the chunk visibly
-            // detaches sideways instead of staying glued.
-            impulse: {
-              x:
-                Math.sign(o.worldX - this.player.body.position.x) *
-                  (1.5 + Math.random() * 1.5) +
-                (Math.random() - 0.5),
-              y: -1 - Math.random() * 2,
-            },
-            kind: "normal",
-          });
-        }
+      // After all targeted removals, the remaining blob may have split.
+      // Keep the largest component and scatter the rest as outward debris.
+      const orphans = this.player.pruneDisconnected();
+      for (const o of orphans) {
+        this.spawnDebris({
+          x: o.worldX,
+          y: o.worldY,
+          angle: this.player.body.angle,
+          velocity: this.player.body.velocity,
+          angularVelocity: this.player.body.angularVelocity,
+          impulse: {
+            x:
+              Math.sign(o.worldX - this.player.body.position.x) *
+                (1.5 + Math.random() * 1.5) +
+              (Math.random() - 0.5),
+            y: -1 - Math.random() * 2,
+          },
+          kind: "normal",
+        });
       }
     }
 
@@ -1158,8 +1183,24 @@ export class Game {
     const halfW = this.boardWidth / 2;
     const offset = Math.max(-1, Math.min(1, halfW > 0 ? (this.player.body.position.x - cx) / halfW : 0));
 
-    drawStarLayer(ctx, this.starsBack, canvasW, canvasH, -offset * PARALLAX_BACK, "#7d97cc");
-    drawStarLayer(ctx, this.starsFront, canvasW, canvasH, -offset * PARALLAX_FRONT, "#ffffff");
+    drawStarLayer(
+      ctx,
+      this.starsBack,
+      canvasW,
+      canvasH,
+      -offset * PARALLAX_BACK,
+      this.starScrollY * STAR_SCROLL_BACK,
+      "#7d97cc",
+    );
+    drawStarLayer(
+      ctx,
+      this.starsFront,
+      canvasW,
+      canvasH,
+      -offset * PARALLAX_FRONT,
+      this.starScrollY * STAR_SCROLL_FRONT,
+      "#ffffff",
+    );
   }
 
   private render(dt: number): void {
@@ -1267,22 +1308,24 @@ function drawStarLayer(
   canvasW: number,
   canvasH: number,
   shiftX: number,
+  shiftY: number,
   color: string,
 ): void {
   ctx.save();
   ctx.fillStyle = color;
   for (const s of stars) {
-    // Wrap horizontally so stars never disappear off one side as the player
-    // moves; positive modulo trick handles negative shifts.
+    // Wrap horizontally + vertically so stars never disappear off one edge
+    // as the parallax / scroll moves them past it; positive modulo trick
+    // handles negative shifts.
     const sx = ((s.x + shiftX) % canvasW + canvasW) % canvasW;
+    const sy = ((s.y + shiftY) % canvasH + canvasH) % canvasH;
     ctx.globalAlpha = s.a;
     ctx.beginPath();
-    ctx.arc(sx, s.y, s.r, 0, Math.PI * 2);
+    ctx.arc(sx, sy, s.r, 0, Math.PI * 2);
     ctx.fill();
   }
   ctx.globalAlpha = 1;
   ctx.restore();
-  void canvasH;
 }
 
 const ALL_KINDS: ClusterKind[] = ["normal", "sticky", "slow", "fast", "coin"];
