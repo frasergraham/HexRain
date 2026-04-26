@@ -76,6 +76,12 @@ Capacitor upgrade), delete `ios/` and run `npm run ios:add`.
 
 ### CI
 
-`.github/workflows/ios.yml` builds the iOS app on every push and pull request
-on a `macos-14` runner. It runs the web build, syncs Capacitor, and produces an
-unsigned simulator `.app` artefact.
+A GitHub Actions workflow that builds the iOS app on every push and pull
+request on a `macos-14` runner is provided as a template at
+`ci-templates/ios.yml.txt`. To enable it, copy that file to
+`.github/workflows/ios.yml` and commit it. It runs the web build, syncs
+Capacitor, and produces an unsigned simulator `.app` artefact.
+
+(The template lives outside `.github/workflows/` because Claude's GitHub
+OAuth app does not hold the `workflow` scope and so cannot push files into
+that directory directly.)
