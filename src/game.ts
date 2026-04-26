@@ -40,7 +40,10 @@ const SLOW_EFFECT_DURATION = 10;
 const FAST_EFFECT_DURATION = 5;
 const STICK_SLOW_BUFFER = 2; // brief slow-mo after gaining a hex
 const SLOW_TIMESCALE = 0.5;
-const FAST_TIMESCALE = 1.25;
+const FAST_TIMESCALE_BASE = 1.25; // first fast pickup
+const FAST_TIMESCALE_STEP = 0.1; // each subsequent stack adds this much speed
+const FAST_MULTIPLIER_BASE = 3; // first fast pickup multiplies passes 3x
+const FAST_MULTIPLIER_STEP = 1; // each stack bumps the multiplier by 1
 
 // Wave variants.
 const SWARM_WAVE_CHANCE = 0.35; // chance any given wave is a single-hex swarm
@@ -80,11 +83,14 @@ interface Floater {
   text: string;
   x: number;
   y: number;
+  vx: number; // px/sec horizontal drift
+  vy: number; // px/sec vertical drift (negative = up)
   age: number;
   lifetime: number;
   fillColor: string;
   glowColor: string;
   fontSize: number;
+  shake: boolean;
 }
 
 interface Drone {
@@ -192,6 +198,15 @@ export class Game {
   private rotateTutorialActive = false;
   private rotateTutorialTimer = 0;
   private rotateTutorialStartAngle = 0;
+
+  // Fast power-up combo state. fastLevel counts how many fast pickups
+  // happened this run (1 → 3x, 2 → 4x, 3 → 5x, …); each pickup also
+  // bumps the timescale by FAST_TIMESCALE_STEP. fastBonus accumulates
+  // the *extra* points (not the base +1) while fast is active. The pool
+  // is awarded as one big "+N" floater when the timer runs out cleanly,
+  // or scattered as a "lost" explosion when the player gets hit.
+  private fastLevel = 0;
+  private fastBonus = 0;
 
   private hexSize = HEX_SIZE_BASE;
   private boardWidth = 0;
@@ -408,6 +423,8 @@ export class Game {
     this.rotateTutorialActive = false;
     this.rotateTutorialTimer = 0;
     this.rotateTutorialStartAngle = 0;
+    this.fastLevel = 0;
+    this.fastBonus = 0;
     // Note: seenKinds is *not* cleared — hints only show on the very first
     // play of the game on this device, never on restarts.
     this.pinch = 0;
@@ -520,10 +537,13 @@ export class Game {
     }
 
     // Real-time effect timer (counts down in wall-clock seconds, regardless
-    // of timescale) so the slow / fast power-up always lasts 10 real seconds.
+    // of timescale) so the slow / fast power-up always lasts its full
+    // duration. When fast expires *cleanly* (no hit ate it), award the
+    // accumulated bonus pool as a single payout.
     if (this.timeEffect !== null) {
       this.timeEffectTimer -= dt;
       if (this.timeEffectTimer <= 0) {
+        if (this.timeEffect === "fast") this.awardFastBonus();
         this.timeEffect = null;
         this.timeScale = 1;
       }
@@ -606,10 +626,14 @@ export class Game {
       const bounds = c.body.bounds;
       if (!c.scored && !c.contacted && bounds.min.y > this.playerY + this.hexSize * 0.3) {
         c.scored = true;
-        // Fast power-up triples per-pass score for the duration of the
-        // effect, so picking one up is genuinely worth the chaos.
-        const passPoints = this.timeEffect === "fast" ? 3 : 1;
-        this.score += passPoints;
+        // Base score always banks at 1. While fast is active, the *extra*
+        // points (multiplier - 1) accumulate into a separate bonus pool
+        // that's awarded only if the player survives to the end of the
+        // effect — and lost entirely on a hit.
+        this.score += 1;
+        if (this.timeEffect === "fast") {
+          this.fastBonus += this.fastMultiplier() - 1;
+        }
         this.comboHits = 0;
         this.scoreEl.textContent = String(this.score);
       }
@@ -684,22 +708,90 @@ export class Game {
     if (drewAny) ctx.restore();
   }
 
+  private fastMultiplier(): number {
+    if (this.fastLevel <= 0) return 1;
+    return FAST_MULTIPLIER_BASE + (this.fastLevel - 1) * FAST_MULTIPLIER_STEP;
+  }
+
+  // Award the accumulated fast bonus to the score with a chunky "+N"
+  // floater. Called when the fast effect timer expires cleanly. After
+  // the award, the bonus pool resets to 0; the multiplier level (and
+  // therefore future stacking) is preserved for the rest of the run.
+  private awardFastBonus(): void {
+    if (this.fastBonus <= 0) return;
+    this.score += this.fastBonus;
+    this.scoreEl.textContent = String(this.score);
+    const com = this.player.body.position;
+    this.spawnFloater(
+      `+${this.fastBonus}`,
+      com.x,
+      com.y - this.hexSize * 1.6,
+      "#c8ffd5",
+      "rgba(120, 255, 170, 0.95)",
+    );
+    this.fastBonus = 0;
+  }
+
+  // The player got hit while fast was active. Scatter the lost bonus as
+  // red fragments, end the fast effect, and reset both the bonus pool
+  // and the multiplier level so the next pickup starts fresh at 3x.
+  private loseFastBonus(): void {
+    if (this.timeEffect !== "fast") return;
+    const lost = this.fastBonus;
+    const com = this.player.body.position;
+    if (lost > 0) {
+      this.spawnFloater(
+        `-${lost}`,
+        com.x,
+        com.y - this.hexSize * 1.6,
+        "#ffb0b0",
+        "rgba(255, 80, 80, 0.95)",
+        { vy: 60, vx: 0, lifetime: 1.0, shake: true },
+      );
+      // A few small fragments scatter outward to sell the loss.
+      for (let i = 0; i < 5; i++) {
+        const a = (i / 5) * Math.PI * 2 + Math.random() * 0.4;
+        this.spawnFloater(
+          `-${Math.max(1, Math.round(lost / 5))}`,
+          com.x,
+          com.y - this.hexSize * 0.8,
+          "#ff8a8a",
+          "rgba(255, 70, 70, 0.95)",
+          {
+            vx: Math.cos(a) * 180,
+            vy: Math.sin(a) * 180,
+            lifetime: 0.7,
+          },
+        );
+      }
+    }
+    this.fastBonus = 0;
+    this.fastLevel = 0;
+    this.timeEffect = null;
+    this.timeEffectTimer = 0;
+    this.timeScale = 1;
+  }
+
   private spawnFloater(
     text: string,
     x: number,
     y: number,
     fillColor: string,
     glowColor: string,
+    opts?: { vx?: number; vy?: number; lifetime?: number; shake?: boolean },
   ): void {
     this.floaters.push({
       text,
       x,
       y,
+      vx: opts?.vx ?? 0,
+      vy: opts?.vy ?? -80,
       age: 0,
-      lifetime: 1.0,
+      lifetime: opts?.lifetime ?? 1.0,
       fillColor,
       glowColor,
       fontSize: Math.max(28, Math.round(this.hexSize * 1.6)),
+      shake: opts?.shake ?? false,
     });
   }
 
@@ -712,15 +804,18 @@ export class Game {
     for (const f of this.floaters) {
       const t = f.age / f.lifetime;
       const alpha = Math.max(0, 1 - t);
-      // Rise + slight ease-out scale so the popup punches in then drifts.
-      const yOffset = -t * 80;
+      // Drift via per-floater velocity (defaults to a 1s upward rise) plus
+      // optional horizontal shake for the "lost bonus" presentation.
+      const xOffset =
+        f.vx * f.age + (f.shake ? Math.sin(f.age * 28) * 5 : 0);
+      const yOffset = f.vy * f.age;
       const scale = 1 + 0.4 * Math.min(1, f.age / 0.18);
       ctx.font = `900 ${f.fontSize}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
       ctx.globalAlpha = alpha;
       ctx.shadowColor = f.glowColor;
       ctx.shadowBlur = 20;
       ctx.save();
-      ctx.translate(f.x, f.y + yOffset);
+      ctx.translate(f.x + xOffset, f.y + yOffset);
       ctx.scale(scale, scale);
       ctx.fillStyle = f.fillColor;
       ctx.fillText(f.text, 0, 0);
@@ -1185,6 +1280,10 @@ export class Game {
   private handleNormalContact(cluster: FallingCluster, contact: ContactInfo): void {
     const allParts = cluster.partWorldPositions();
 
+    // A normal-cluster hit while fast is active vaporises the accumulated
+    // bonus pool — scatter it as red fragments and end the effect.
+    this.loseFastBonus();
+
     // Snapshot pre-hit size so the lose check only counts hits taken while
     // already in the danger zone. Otherwise a fast 5→6→7 combo would end
     // the run before the danger glow ever appears.
@@ -1270,6 +1369,9 @@ export class Game {
 
   private handleStickyContact(cluster: FallingCluster, contact: ContactInfo): void {
     const allParts = cluster.partWorldPositions();
+    // Sticky also counts as "getting hit" for the fast bonus — losing
+    // hexes scatters the bonus pool just like a normal hit.
+    this.loseFastBonus();
     // A sticky cluster of N hexes rips off N-1 hexes from the player
     // (floor of 1, capped at player size - 1 so we always leave at least
     // one cell). The cells removed are the N-1 closest to the contact
@@ -1384,12 +1486,22 @@ export class Game {
       this.timeEffectTimer = SLOW_EFFECT_DURATION;
       this.timeEffectMax = SLOW_EFFECT_DURATION;
     } else if (cluster.kind === "fast") {
+      // Each fast pickup stacks: level += 1, speed += 0.1, multiplier += 1.
+      // Existing accumulated bonus carries into the new effect so combos
+      // can stack big rewards across multiple pickups.
+      this.fastLevel += 1;
       this.timeEffect = "fast";
-      this.timeScale = FAST_TIMESCALE;
+      this.timeScale = FAST_TIMESCALE_BASE + (this.fastLevel - 1) * FAST_TIMESCALE_STEP;
       this.timeEffectTimer = FAST_EFFECT_DURATION;
       this.timeEffectMax = FAST_EFFECT_DURATION;
-      // Multiplier popup so the player notices the 3x is now active.
-      this.spawnFloater("3X", center.x, center.y, "#c8ffd5", "rgba(120, 255, 170, 0.95)");
+      const mul = this.fastMultiplier();
+      this.spawnFloater(
+        `${mul}X`,
+        center.x,
+        center.y,
+        "#c8ffd5",
+        "rgba(120, 255, 170, 0.95)",
+      );
     }
 
     // Burst the powerup into debris so the pickup feels punchy.
@@ -1840,7 +1952,9 @@ export class Game {
     // Floating score popups (+5 on coin pickup, 3X on fast pickup).
     this.drawFloaters();
 
-    // Time-effect HUD: a small countdown bar at the top of the play area.
+    // Time-effect HUD: a small countdown bar at the top of the play area,
+    // with an extra "{N}X · +M" line just under it while fast is active so
+    // the player can see the multiplier and the running bonus pool grow.
     if (this.timeEffect !== null) {
       const frac = Math.max(0, this.timeEffectTimer / this.timeEffectMax);
       const w = this.boardWidth * 0.6;
@@ -1851,6 +1965,25 @@ export class Game {
       ctx.fillRect(x0, y0, w, 6);
       ctx.fillStyle = color;
       ctx.fillRect(x0, y0, w * frac, 6);
+
+      if (this.timeEffect === "fast") {
+        const cx = this.boardOriginX + this.boardWidth / 2;
+        const fontSize = Math.max(20, Math.round(this.hexSize * 1.05));
+        ctx.save();
+        ctx.font = `900 ${fontSize}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "top";
+        ctx.shadowColor = "rgba(120, 255, 170, 0.95)";
+        ctx.shadowBlur = 12;
+        ctx.fillStyle = "#c8ffd5";
+        const label = `${this.fastMultiplier()}X · +${this.fastBonus}`;
+        ctx.fillText(label, cx, y0 + 12);
+        ctx.shadowBlur = 0;
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = "rgba(0, 60, 20, 0.85)";
+        ctx.strokeText(label, cx, y0 + 12);
+        ctx.restore();
+      }
     }
   }
 }
