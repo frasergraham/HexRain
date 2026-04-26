@@ -141,15 +141,25 @@ body {
   display: flex;
 }
 
-/* --- Rotation pad (left thumb) --- */
+/* --- Rotation pad (left thumb, iPod click-wheel style) --- */
 
 .rotatepad {
   position: relative;
   width: 130px;
   height: 130px;
   flex-shrink: 0;
-  background: #1f2440;
   border-radius: 50%;
+  /* Ring: opaque outer band, transparent center. The hole is a visual cue
+     that your thumb slides along the rim. (The hit area covers the whole
+     pad and only the angle is read, so dragging anywhere still works.) */
+  background:
+    radial-gradient(
+      circle at center,
+      transparent 0,
+      transparent 38px,
+      #1f2440 39px,
+      #1f2440 100%
+    );
   touch-action: none;
   user-select: none;
   -webkit-user-select: none;
@@ -157,9 +167,9 @@ body {
 
 .rotatepad-ring {
   position: absolute;
-  inset: 8px;
+  inset: 6px;
   border-radius: 50%;
-  border: 2px dashed rgba(155, 240, 194, 0.25);
+  border: 1px dashed rgba(155, 240, 194, 0.25);
   pointer-events: none;
 }
 
@@ -171,7 +181,7 @@ body {
   background: #2ec27a;
   border: 2px solid #9bf0c2;
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
-  /* Default position: top center of the pad. Updated via JS on touch. */
+  /* Default: top of the ring. JS positions it on touch. */
   top: 6px;
   left: calc(50% - 15px);
   pointer-events: none;

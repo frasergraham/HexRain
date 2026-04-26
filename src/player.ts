@@ -178,6 +178,21 @@ export class Player {
     Body.setAngularVelocity(this.body, av);
   }
 
+  // Teleport the body's x to the given world x. Used by the touch slider for
+  // direct, lag-free position mapping. Velocity is held at zero so the body
+  // doesn't drift after the touch lifts.
+  setX(x: number): void {
+    Body.setPosition(this.body, { x, y: this.body.position.y });
+    Body.setVelocity(this.body, { x: 0, y: this.body.velocity.y });
+  }
+
+  // Teleport the body angle. Used by the touch rotate pad for direct, lag-
+  // free orientation mapping.
+  setAngle(angle: number): void {
+    Body.setAngle(this.body, angle);
+    Body.setAngularVelocity(this.body, 0);
+  }
+
   // Drive the player's rotation toward the given world-frame angle using a
   // capped P controller. Returns the angular velocity that was applied.
   driveToAngle(targetAngle: number, gain: number, maxSpeed: number): number {

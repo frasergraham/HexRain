@@ -25,12 +25,8 @@ const STICK_INVULN_MS = 180;
 const STICKY_SPAWN_CHANCE = 0.12;
 const STICKY_MIN_SCORE = 3;
 
-const PLAYER_MOVE_SPEED = 5.5; // px/ms (Matter velocity units)
+const PLAYER_MOVE_SPEED = 5.5; // px/ms (Matter velocity units, keyboard hold)
 const PLAYER_ROT_SPEED = 0.05; // rad/ms (keyboard hold)
-const PLAYER_TARGET_ROT_GAIN = 0.18; // P-controller gain for touch rotation
-const PLAYER_TARGET_ROT_MAX = 0.18; // cap on touch-driven angular velocity
-const PLAYER_SLIDE_GAIN = 0.4; // P-controller gain for slider movement
-const PLAYER_SLIDE_MAX = 8; // cap on slider-driven horizontal velocity
 const RAIL_BOTTOM_INSET = 4; // px above the board bottom where the rail sits
 
 // Collision categories.
@@ -133,9 +129,20 @@ export class Game {
 
     this.resize();
     window.addEventListener("resize", () => this.resize());
+    // Layout changes that don't fire window-resize (e.g. the touchbar going
+    // from display:none to display:flex) still need a buffer recalc, or the
+    // canvas pixel buffer will be stretched into the new CSS box and the
+    // game will render squashed.
+    if (typeof ResizeObserver !== "undefined") {
+      const ro = new ResizeObserver(() => this.resize());
+      ro.observe(this.canvas);
+    }
 
     if (isTouchDevice()) this.touchbar.classList.add("show");
     this.touchbar.setAttribute("aria-hidden", "false");
+    // Touchbar visibility just changed the layout; resize once the browser
+    // has reflowed.
+    requestAnimationFrame(() => this.resize());
 
     this.unbindInput = bindInput(this.touchbar, (action, pressed) =>
       this.onInput(action, pressed),
@@ -299,17 +306,14 @@ export class Game {
 
     // Player input → physics velocities.
     if (this.slideTarget !== null) {
-      // Map slider value to a target x within the play area, then drive the
-      // player's CoM toward it with a capped P controller. This gives the
-      // 1:1-ish feel of a touch slider while still going through the engine.
-      const usableHalfWidth = this.boardWidth / 2 - this.hexSize * 0.5;
+      // Direct, lag-free position mapping from the slider. Map [-1, 1] to a
+      // target x inside the playable horizontal range and teleport.
+      const halfBoundsW =
+        (this.player.body.bounds.max.x - this.player.body.bounds.min.x) / 2;
+      const usableHalfWidth = Math.max(0, this.boardWidth / 2 - halfBoundsW);
       const targetX =
         this.boardOriginX + this.boardWidth / 2 + this.slideTarget * usableHalfWidth;
-      const diff = targetX - this.player.body.position.x;
-      let vx = diff * PLAYER_SLIDE_GAIN;
-      if (vx > PLAYER_SLIDE_MAX) vx = PLAYER_SLIDE_MAX;
-      else if (vx < -PLAYER_SLIDE_MAX) vx = -PLAYER_SLIDE_MAX;
-      this.player.setHorizontalVelocity(vx);
+      this.player.setX(targetX);
     } else {
       const wantLeft = this.holds.left.active;
       const wantRight = this.holds.right.active;
@@ -320,11 +324,8 @@ export class Game {
     }
 
     if (this.rotationTarget !== null) {
-      this.player.driveToAngle(
-        this.rotationTarget,
-        PLAYER_TARGET_ROT_GAIN,
-        PLAYER_TARGET_ROT_MAX,
-      );
+      // Direct, lag-free angle mapping from the click-wheel pad.
+      this.player.setAngle(this.rotationTarget);
     } else if (this.holds.rotateCw.active && !this.holds.rotateCcw.active) {
       this.player.setAngularVelocity(PLAYER_ROT_SPEED);
     } else if (this.holds.rotateCcw.active && !this.holds.rotateCw.active) {
