@@ -4,8 +4,11 @@ import { DebrisHex } from "./debris";
 import {
   ACHIEVEMENTS,
   type AchievementId,
+  type AchievementMeta,
+  getEarnedAchievements,
   initGameCenter,
   reportAchievement,
+  setAchievementListener,
   submitScore as gcSubmitScore,
 } from "./gameCenter";
 import { SQRT3 } from "./hex";
@@ -373,8 +376,68 @@ export class Game {
 
     this.renderMenu();
 
+    // Banner listener fires only on platforms where Game Center isn't doing
+    // its own banner (i.e. web). Banners are queued so back-to-back unlocks
+    // don't stack visually on top of each other.
+    setAchievementListener((meta) => this.queueAchievementBanner(meta));
+
     // Fire-and-forget Game Center auth on iOS; no-op elsewhere.
     void initGameCenter();
+  }
+
+  // Queue of metas waiting to be shown; we display one at a time.
+  private bannerQueue: AchievementMeta[] = [];
+  private bannerActive = false;
+
+  private queueAchievementBanner(meta: AchievementMeta): void {
+    this.bannerQueue.push(meta);
+    if (!this.bannerActive) this.dequeueAchievementBanner();
+  }
+
+  private dequeueAchievementBanner(): void {
+    const meta = this.bannerQueue.shift();
+    if (!meta) {
+      this.bannerActive = false;
+      return;
+    }
+    this.bannerActive = true;
+    const banner = document.createElement("div");
+    banner.className = "achievement-banner";
+    banner.style.setProperty("--banner-tint", meta.tint);
+    banner.innerHTML = `
+      <div class="achievement-banner-icon">${escapeHtml(meta.badge)}</div>
+      <div class="achievement-banner-text">
+        <span class="achievement-banner-label">Achievement</span>
+        <span class="achievement-banner-name">${escapeHtml(meta.name)}</span>
+        <span class="achievement-banner-desc">${escapeHtml(meta.description)}</span>
+      </div>
+    `;
+    document.body.appendChild(banner);
+    // Force a reflow so the transition runs from the off-screen state.
+    void banner.offsetHeight;
+    banner.classList.add("show");
+    setTimeout(() => {
+      banner.classList.remove("show");
+      setTimeout(() => {
+        banner.remove();
+        // The on-menu badge strip is recomputed live so the player sees
+        // the new earn appear without restarting.
+        this.renderAchievementBadges();
+        this.dequeueAchievementBanner();
+      }, 380);
+    }, 2800);
+  }
+
+  private renderAchievementBadges(): void {
+    const host = document.getElementById("achievementBadges");
+    if (!host) return;
+    const earned = getEarnedAchievements();
+    host.innerHTML = earned
+      .map(
+        (m) =>
+          `<span class="achievement-badge" style="--badge-tint:${m.tint}" title="${escapeHtml(m.name)} — ${escapeHtml(m.description)}">${escapeHtml(m.badge)}</span>`,
+      )
+      .join("");
   }
 
   private installDebugButtons(): void {
@@ -481,6 +544,7 @@ export class Game {
 
   private renderMenu(): void {
     this.overlay.classList.remove("hidden");
+    this.renderAchievementBadges();
   }
 
   private renderGameOver(): void {
@@ -488,8 +552,10 @@ export class Game {
       <h1>GAME OVER</h1>
       <p class="tagline">Score ${this.score} &middot; Best ${this.best}</p>
       <p class="hint">Press <kbd>Space</kbd> or tap to play again</p>
+      <div id="achievementBadges" class="achievement-badges" aria-label="Earned achievements"></div>
     `;
     this.overlay.classList.remove("hidden");
+    this.renderAchievementBadges();
   }
 
   private onInput(action: InputAction, pressed: boolean): void {
@@ -2117,6 +2183,15 @@ export class Game {
       }
     }
   }
+}
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function generateStars(
