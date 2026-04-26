@@ -323,15 +323,9 @@ export class Game {
       const bounds = c.body.bounds;
       if (!c.scored && !c.contacted && bounds.min.y > this.playerY + this.hexSize * 1.2) {
         c.scored = true;
-        const passSize = c.partAxial.size; // 2..5
-        this.score += passSize;
+        this.score += 1;
         this.comboHits = 0;
         this.scoreEl.textContent = String(this.score);
-
-        // Nx-bonus achievements: passing an N-hex cluster untouched.
-        if (passSize >= 5) void reportAchievement(ACHIEVEMENTS.bonus5x);
-        if (passSize >= 4) void reportAchievement(ACHIEVEMENTS.bonus4x);
-        if (passSize >= 3) void reportAchievement(ACHIEVEMENTS.bonus3x);
 
         this.checkScoreMilestones();
       }
