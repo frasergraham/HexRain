@@ -295,6 +295,55 @@ export class Player {
     return true;
   }
 
+  // After a cell is removed the remaining blob may have split into two or
+  // more disconnected pieces. Keep the largest component, capture world
+  // positions for the rest, prune them, and return the pruned info so the
+  // caller can spawn debris that tumbles away from the body.
+  pruneDisconnected(): Array<{ cell: Axial; worldX: number; worldY: number }> {
+    if (this.cells.length <= 1) return [];
+
+    const cellSet = new Set(this.cells.map((c) => `${c.q},${c.r}`));
+    const visited = new Set<string>();
+    const components: Axial[][] = [];
+
+    for (const start of this.cells) {
+      const sk = `${start.q},${start.r}`;
+      if (visited.has(sk)) continue;
+      const component: Axial[] = [];
+      const stack: Axial[] = [start];
+      while (stack.length > 0) {
+        const c = stack.pop()!;
+        const ck = `${c.q},${c.r}`;
+        if (visited.has(ck)) continue;
+        visited.add(ck);
+        component.push(c);
+        for (const n of neighborsOf(c)) {
+          const nk = `${n.q},${n.r}`;
+          if (cellSet.has(nk) && !visited.has(nk)) stack.push(n);
+        }
+      }
+      components.push(component);
+    }
+
+    if (components.length <= 1) return [];
+
+    components.sort((a, b) => b.length - a.length);
+    const keep = components[0]!;
+    const toPrune: Axial[] = [];
+    for (let i = 1; i < components.length; i++) toPrune.push(...components[i]!);
+
+    // Capture world positions BEFORE rebuilding (rebuild reseats parts).
+    const removed = toPrune.map((c) => {
+      const wp = this.cellWorldCenter(c);
+      return { cell: c, worldX: wp.x, worldY: wp.y };
+    });
+
+    const keepSet = new Set(keep.map((c) => `${c.q},${c.r}`));
+    this.cells = this.cells.filter((c) => keepSet.has(`${c.q},${c.r}`));
+    this.rebuildBody();
+    return removed;
+  }
+
   private rebuildBody(): void {
     const oldBody = this.body;
     const pos = { ...oldBody.position };

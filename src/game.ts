@@ -592,6 +592,30 @@ export class Game {
           kind: "normal",
         });
         this.player.removeCell(targetCell);
+
+        // Removing the targeted cell may have split the blob into two or
+        // more disconnected pieces. Keep the largest, scatter the rest as
+        // debris that tumbles in the player's current motion frame.
+        const orphans = this.player.pruneDisconnected();
+        for (const o of orphans) {
+          this.spawnDebris({
+            x: o.worldX,
+            y: o.worldY,
+            angle: this.player.body.angle,
+            velocity: this.player.body.velocity,
+            angularVelocity: this.player.body.angularVelocity,
+            // Push outward away from the player CoM so the chunk visibly
+            // detaches sideways instead of staying glued.
+            impulse: {
+              x:
+                Math.sign(o.worldX - this.player.body.position.x) *
+                  (1.5 + Math.random() * 1.5) +
+                (Math.random() - 0.5),
+              y: -1 - Math.random() * 2,
+            },
+            kind: "normal",
+          });
+        }
       }
     }
 
