@@ -1,10 +1,25 @@
 import { Composite, Engine, Events, type IEventCollision } from "matter-js";
 import { FallingCluster, pickShape } from "./cluster";
 import { DebrisHex } from "./debris";
+import {
+  ACHIEVEMENTS,
+  type AchievementId,
+  initGameCenter,
+  reportAchievement,
+  submitScore as gcSubmitScore,
+} from "./gameCenter";
 import { SQRT3 } from "./hex";
 import { bindInput, isTouchDevice } from "./input";
 import { Player } from "./player";
 import type { ClusterKind, GameState, InputAction } from "./types";
+
+const SCORE_MILESTONES: ReadonlyArray<{ threshold: number; id: AchievementId }> = [
+  { threshold: 200, id: ACHIEVEMENTS.score200 },
+  { threshold: 400, id: ACHIEVEMENTS.score400 },
+  { threshold: 600, id: ACHIEVEMENTS.score600 },
+  { threshold: 800, id: ACHIEVEMENTS.score800 },
+  { threshold: 1000, id: ACHIEVEMENTS.score1000 },
+];
 
 const HEX_SIZE_BASE = 22;
 const BOARD_COLS = 9;
@@ -54,6 +69,10 @@ export class Game {
   private best = 0;
   private comboHits = 0;
   private spawnTimer = 0;
+
+  // Per-run achievement tracking.
+  private nextMilestoneIdx = 0;
+  private wasInDangerThisRun = false;
 
   private engine: Engine;
   private clusters: FallingCluster[] = [];
@@ -134,6 +153,9 @@ export class Game {
     });
 
     this.renderMenu();
+
+    // Fire-and-forget Game Center auth on iOS; no-op elsewhere.
+    void initGameCenter();
   }
 
   start(): void {
@@ -167,6 +189,8 @@ export class Game {
     this.score = 0;
     this.comboHits = 0;
     this.spawnTimer = 0;
+    this.nextMilestoneIdx = 0;
+    this.wasInDangerThisRun = false;
 
     this.player = new Player({
       centerX: this.boardOriginX + this.boardWidth / 2,
@@ -253,7 +277,15 @@ export class Game {
       this.player.setAngularVelocity(-PLAYER_ROT_SPEED);
     }
 
-    this.player.inDanger = this.player.size() >= DANGER_SIZE;
+    const playerSize = this.player.size();
+    this.player.inDanger = playerSize >= DANGER_SIZE;
+
+    // Survivor: was in danger and clawed back to a single hex.
+    if (playerSize >= DANGER_SIZE) this.wasInDangerThisRun = true;
+    if (this.wasInDangerThisRun && playerSize === 1) {
+      void reportAchievement(ACHIEVEMENTS.survivor);
+      this.wasInDangerThisRun = false;
+    }
 
     // Spawn.
     this.spawnTimer -= dt;
@@ -291,9 +323,17 @@ export class Game {
       const bounds = c.body.bounds;
       if (!c.scored && !c.contacted && bounds.min.y > this.playerY + this.hexSize * 1.2) {
         c.scored = true;
-        this.score += 1;
+        const passSize = c.partAxial.size; // 2..5
+        this.score += passSize;
         this.comboHits = 0;
         this.scoreEl.textContent = String(this.score);
+
+        // Nx-bonus achievements: passing an N-hex cluster untouched.
+        if (passSize >= 5) void reportAchievement(ACHIEVEMENTS.bonus5x);
+        if (passSize >= 4) void reportAchievement(ACHIEVEMENTS.bonus4x);
+        if (passSize >= 3) void reportAchievement(ACHIEVEMENTS.bonus3x);
+
+        this.checkScoreMilestones();
       }
       if (bounds.min.y > screenBottom) {
         c.alive = false;
@@ -507,7 +547,17 @@ export class Game {
       localStorage.setItem("hexrain.highScore", String(this.best));
       this.bestEl.textContent = String(this.best);
     }
+    void gcSubmitScore(this.score);
     this.renderGameOver();
+  }
+
+  private checkScoreMilestones(): void {
+    while (this.nextMilestoneIdx < SCORE_MILESTONES.length) {
+      const m = SCORE_MILESTONES[this.nextMilestoneIdx]!;
+      if (this.score < m.threshold) break;
+      void reportAchievement(m.id);
+      this.nextMilestoneIdx += 1;
+    }
   }
 
   private resize(): void {

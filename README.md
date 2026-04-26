@@ -51,6 +51,39 @@ src/
   style.css    layout, HUD, touch buttons
 ```
 
+## Scoring
+
+Each cluster that drops past the player without contact awards points equal
+to its size (a 5-hex cluster is a 5x bonus). Stick with a cluster on contact
+and you score nothing. Survive long enough to grow into the danger zone and
+the next sticky hit either rips you back to safety or ends the run.
+
+## Game Center (iOS)
+
+When running as a native iOS app the game authenticates the local player
+against Game Center on launch and reports to a leaderboard plus a set of
+achievements. On the web build Game Center is a no-op.
+
+The IDs the JS code reports are defined in `src/gameCenter.ts`. To make them
+live in production you need to create matching entries in App Store Connect:
+
+| Kind        | Identifier                | Description                                |
+| ----------- | ------------------------- | ------------------------------------------ |
+| Leaderboard | `hex_rain.high_score`     | High score, integer, higher is better      |
+| Achievement | `hex_rain.score_200`      | Reach 200 points                           |
+| Achievement | `hex_rain.score_400`      | Reach 400 points                           |
+| Achievement | `hex_rain.score_600`      | Reach 600 points                           |
+| Achievement | `hex_rain.score_800`      | Reach 800 points                           |
+| Achievement | `hex_rain.score_1000`     | Reach 1000 points                          |
+| Achievement | `hex_rain.bonus_3x`       | Score a 3x bonus (3-hex cluster pass)      |
+| Achievement | `hex_rain.bonus_4x`       | Score a 4x bonus (4-hex cluster pass)      |
+| Achievement | `hex_rain.bonus_5x`       | Score a 5x bonus (5-hex cluster pass)      |
+| Achievement | `hex_rain.survivor`       | Reach the danger zone and claw back to one |
+
+Until those entries exist in App Store Connect (or until you sign in with a
+sandbox Game Center account on the simulator) the report calls fail silently
+and the rest of the game keeps working.
+
 ## iOS (Capacitor)
 
 The game is wrapped as a native iOS app via [Capacitor](https://capacitorjs.com/).
