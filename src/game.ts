@@ -29,9 +29,10 @@ const FAST_SPAWN_CHANCE = 0.05;
 const POWERUP_MIN_SCORE = 5;
 
 // Time-effect tuning.
-const TIME_EFFECT_DURATION = 10;
+const SLOW_EFFECT_DURATION = 10;
+const FAST_EFFECT_DURATION = 5;
 const SLOW_TIMESCALE = 0.5;
-const FAST_TIMESCALE = 1.5;
+const FAST_TIMESCALE = 1.25;
 
 // Wave variants.
 const SWARM_WAVE_CHANCE = 0.35; // chance any given wave is a single-hex swarm
@@ -618,11 +619,12 @@ export class Game {
     if (cluster.kind === "slow") {
       this.timeEffect = "slow";
       this.timeScale = SLOW_TIMESCALE;
+      this.timeEffectTimer = SLOW_EFFECT_DURATION;
     } else if (cluster.kind === "fast") {
       this.timeEffect = "fast";
       this.timeScale = FAST_TIMESCALE;
+      this.timeEffectTimer = FAST_EFFECT_DURATION;
     }
-    this.timeEffectTimer = TIME_EFFECT_DURATION;
 
     // Burst the powerup into debris so the pickup feels punchy.
     const allParts = cluster.partWorldPositions();
@@ -968,7 +970,9 @@ export class Game {
 
     // Time-effect HUD: a small countdown bar at the top of the play area.
     if (this.timeEffect !== null) {
-      const frac = Math.max(0, this.timeEffectTimer / TIME_EFFECT_DURATION);
+      const totalDuration =
+        this.timeEffect === "slow" ? SLOW_EFFECT_DURATION : FAST_EFFECT_DURATION;
+      const frac = Math.max(0, this.timeEffectTimer / totalDuration);
       const w = this.boardWidth * 0.6;
       const x0 = this.boardOriginX + (this.boardWidth - w) / 2;
       const y0 = this.boardOriginY + 6;
