@@ -121,6 +121,8 @@ const STAR_SCROLL_FRONT = 18; // px/sec downward drift of the front plane
 
 const HINT_TIMESCALE = 0.5; // game runs at this rate while a hint cluster is on screen
 const ROTATE_TUTORIAL_TIMESCALE = 0.25; // even slower while teaching the rotate gesture
+const LATE_RAMP_FLOOR_SCORE = 500; // late-game speed-up kicks in at this score
+const LATE_RAMP_PER_100 = 0.1; // base rate gains this much per 100 points past the floor
 const ROTATE_SLIDE_SENS = 0.02; // radians of player rotation per pixel of horizontal drag
 
 export class Game {
@@ -565,15 +567,16 @@ export class Game {
       }
     }
 
-    // While a hint cluster is on screen, force a 0.5x slow so the player
-    // can read the label and absorb what to do. The rotate tutorial drops
-    // it further to 0.25x. We always take the slowest of the active
-    // constraints stacked on top of the power-up timeScale.
+    // The slowest active relative modifier (power-up + hint + tutorial)
+    // determines how much we slow vs the current base rate. The base
+    // rate itself ramps with the late-game multiplier so slow/fast feel
+    // proportional to whatever the current "100%" of the game is.
     const hintActive = this.clusters.some((c) => c.hintLabel && c.alive);
-    let effectiveScale = this.timeScale;
-    if (hintActive) effectiveScale = Math.min(effectiveScale, HINT_TIMESCALE);
+    let modifier = this.timeScale;
+    if (hintActive) modifier = Math.min(modifier, HINT_TIMESCALE);
     if (this.rotateTutorialActive)
-      effectiveScale = Math.min(effectiveScale, ROTATE_TUTORIAL_TIMESCALE);
+      modifier = Math.min(modifier, ROTATE_TUTORIAL_TIMESCALE);
+    const effectiveScale = modifier * this.lateGameSpeedMul();
 
     // gameDt drives physics + spawn + wave so slow-mo really slows everything.
     const gameDt = dt * effectiveScale;
@@ -1755,6 +1758,16 @@ export class Game {
       return Math.min(MAX_FALL_SPEED * 1.7, base * this.waveParams().waveSpeedMul * variance);
     }
     return base;
+  }
+
+  // Late-game permanent speed-up: every 100 points past 500 raises the
+  // game's base rate by 10%, so 600 → 1.1×, 1000 → 1.5×, 1500 → 2.0×.
+  // Slow / fast / hint / tutorial modifiers all multiply on top, so a
+  // 1.0× slow at score 1000 is 0.75× wall-clock and a 1.25× fast is
+  // 1.875×. Capped at 2.5× so the game stays playable at extreme scores.
+  private lateGameSpeedMul(): number {
+    const raw = 1 + Math.max(0, (this.score - LATE_RAMP_FLOOR_SCORE) / 100) * LATE_RAMP_PER_100;
+    return Math.min(2.5, raw);
   }
 
   private advanceWavePhase(dt: number): void {
