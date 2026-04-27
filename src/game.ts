@@ -263,6 +263,7 @@ export class Game {
   private touchbar: HTMLElement;
   private scoreEl: HTMLElement;
   private bestEl: HTMLElement;
+  private pauseBtn: HTMLElement | null;
 
   private state: GameState = "menu";
   private difficulty: Difficulty = DIFFICULTY_DEFAULT;
@@ -274,6 +275,10 @@ export class Game {
   // single-cell blue cluster so the first-ever AVOID hint label lands
   // dead-centre on the screen.
   private firstSpawn = true;
+  // Seconds remaining on the 3-2-1 resume-from-pause countdown. While
+  // > 0 the state stays "paused" so update() short-circuits, but the
+  // overlay is hidden and a big number renders in the centre.
+  private resumeCountdown = 0;
 
   // Per-run achievement tracking.
   private nextMilestoneIdx = 0;
@@ -408,6 +413,18 @@ export class Game {
     this.touchbar = opts.touchbar;
     this.scoreEl = opts.scoreEl;
     this.bestEl = opts.bestEl;
+    this.pauseBtn = document.getElementById("pauseBtn");
+    this.pauseBtn?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.pauseGame();
+    });
+
+    // Auto-pause when the app/tab is backgrounded. On iOS this fires when
+    // the user switches apps or hits the home button so a long run isn't
+    // ruined by a notification interruption.
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden && this.state === "playing") this.pauseGame();
+    });
 
     // Migrate the original single-best key into the medium per-difficulty
     // slot the first time we see it, then forget the legacy key.
@@ -522,8 +539,7 @@ export class Game {
       }
 
       if (this.state === "paused") {
-        this.state = "playing";
-        this.overlay.classList.add("hidden");
+        this.beginResumeCountdown();
       } else {
         this.startOrRestart();
       }
@@ -706,6 +722,8 @@ export class Game {
     this.spawnTimer = 0;
     this.firstSpawn = true;
     this.setScoreVisible(true);
+    this.setPauseButtonVisible(true);
+    this.resumeCountdown = 0;
     this.nextMilestoneIdx = 0;
     this.wasInDangerThisRun = false;
     this.wavePhase = "calm";
@@ -754,11 +772,37 @@ export class Game {
     // Score is always 0 on the menu — the BEST readout is the only
     // useful number. Hide the score block until a run starts.
     this.setScoreVisible(false);
+    this.setPauseButtonVisible(false);
   }
 
   private setScoreVisible(visible: boolean): void {
     const scoreParent = this.scoreEl.parentElement;
     if (scoreParent) scoreParent.hidden = !visible;
+  }
+
+  private setPauseButtonVisible(visible: boolean): void {
+    if (this.pauseBtn) this.pauseBtn.hidden = !visible;
+  }
+
+  private pauseGame(): void {
+    if (this.state !== "playing") return;
+    this.state = "paused";
+    this.resumeCountdown = 0;
+    this.overlay.innerHTML = `
+      <h1>PAUSED</h1>
+      <p class="hint">Tap to resume</p>
+    `;
+    this.overlay.classList.remove("hidden");
+    this.setPauseButtonVisible(false);
+  }
+
+  private beginResumeCountdown(): void {
+    if (this.state !== "paused") return;
+    this.overlay.classList.add("hidden");
+    this.resumeCountdown = 3;
+    // Pause button stays hidden during the countdown — the player can
+    // see the big number and shouldn't be jostling the UI mid-count.
+    this.setPauseButtonVisible(false);
   }
 
   private difficultyButtonsHtml(): string {
@@ -795,17 +839,11 @@ export class Game {
       }
     }
     if (action === "pause" && pressed && this.state === "playing") {
-      this.state = "paused";
-      this.overlay.innerHTML = `
-        <h1>PAUSED</h1>
-        <p class="hint">Tap to resume</p>
-      `;
-      this.overlay.classList.remove("hidden");
+      this.pauseGame();
       return;
     }
     if (action === "pause" && pressed && this.state === "paused") {
-      this.state = "playing";
-      this.overlay.classList.add("hidden");
+      this.beginResumeCountdown();
       return;
     }
     // Movement holds are accepted in menu too so the player can try the
@@ -829,7 +867,20 @@ export class Game {
   }
 
   private update(dt: number): void {
-    if (this.state === "paused") return;
+    if (this.state === "paused") {
+      // Tick the resume countdown (3 → 2 → 1 → go) even while paused so
+      // the wait-then-resume flow advances. When it hits zero we flip
+      // back into "playing" and the next frame runs the full update.
+      if (this.resumeCountdown > 0) {
+        this.resumeCountdown -= dt;
+        if (this.resumeCountdown <= 0) {
+          this.resumeCountdown = 0;
+          this.state = "playing";
+          this.setPauseButtonVisible(true);
+        }
+      }
+      return;
+    }
 
     // Starfield + nebula drift downward in real time during menu, play
     // and gameover. The nebula intensity eases toward the tier target so
@@ -1573,6 +1624,42 @@ export class Game {
   // ROTATE tutorial overlay: a curved double-headed arrow ringing the
   // player + a big "ROTATE" label, both pulsing softly. Drawn last over
   // gameplay so it can't get hidden behind clusters.
+  private drawResumeCountdown(): void {
+    if (this.resumeCountdown <= 0) return;
+    const remaining = this.resumeCountdown;
+    const num = Math.ceil(remaining);
+    if (num <= 0) return;
+
+    const ctx = this.ctx;
+    // Each second runs frac=1 (just appeared) → frac=0 (about to roll).
+    // Use that to scale-in fast and fade-out at the very end.
+    const frac = remaining - (num - 1);
+    const t = 1 - frac; // 0 → 1 over the second
+    const scale = 0.55 + 0.45 * Math.min(1, t * 5);
+    const alpha = t > 0.85 ? Math.max(0, 1 - (t - 0.85) / 0.15) : 1;
+
+    const cx = this.boardOriginX + this.boardWidth / 2;
+    const cy = this.boardOriginY + this.boardHeight * 0.4;
+    const fontSize = Math.max(96, Math.round(this.hexSize * 5));
+
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.scale(scale, scale);
+    ctx.globalAlpha = alpha;
+    ctx.font = `600 ${fontSize}px "Avenir Next", "Helvetica Neue", "Trebuchet MS", Arial, sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.shadowColor = "rgba(91, 139, 255, 0.85)";
+    ctx.shadowBlur = 32;
+    ctx.fillStyle = "#e8ecff";
+    ctx.fillText(String(num), 0, 0);
+    ctx.shadowBlur = 0;
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = "rgba(13, 15, 28, 0.85)";
+    ctx.strokeText(String(num), 0, 0);
+    ctx.restore();
+  }
+
   private drawRotateTutorial(): void {
     if (!this.rotateTutorialActive) return;
     const ctx = this.ctx;
@@ -2479,6 +2566,8 @@ export class Game {
 
   private endGame(): void {
     this.state = "gameover";
+    this.setPauseButtonVisible(false);
+    this.resumeCountdown = 0;
     // Don't bank a new high score for runs that started above 0 — those
     // are debug "skip-ahead" runs and the score isn't earned cleanly.
     if (!this.debugRun && this.score > this.best) {
@@ -2756,6 +2845,10 @@ export class Game {
 
     // Rotate-gesture tutorial (only fires once per page session).
     this.drawRotateTutorial();
+
+    // 3-2-1 resume countdown after unpause. Drawn on top of the play
+    // field so the player has a clear visual cue before action restarts.
+    this.drawResumeCountdown();
 
     // Floating score popups (+5 on coin pickup, 3X on fast pickup).
     this.drawFloaters();
