@@ -1517,11 +1517,12 @@ export class Game {
     const wasInDanger = this.player.size() >= DANGER_SIZE;
     const sizeBefore = this.player.size();
 
-    // Mirrors sticky's removal rule: an N-hex blue sticks max(1, N-1) hexes
-    // onto the player, so bigger blocks bite harder. Each stick anchors at
-    // the cluster part closest to the contact point that hasn't already
-    // been used, and chains via findStickCell on the rebuilt blob.
-    const stickCount = Math.max(1, allParts.length - 1);
+    // Bigger blocks bite harder, but a notch gentler than sticky removes:
+    // 1–3 hex clusters stick 1, 4 sticks 2, 5 sticks 3 (max(1, N-2)). Each
+    // stick anchors at the cluster part closest to the contact point that
+    // hasn't already been used, and chains via findStickCell on the
+    // rebuilt blob.
+    const stickCount = Math.max(1, allParts.length - 2);
     const partsByDist = allParts
       .map((p) => ({
         p,
