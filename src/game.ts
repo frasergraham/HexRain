@@ -652,37 +652,47 @@ export class Game {
 
     // Pointy-top hex sized so the bounding box matches the existing
     // 44×50 badge clip-path: width = SQRT3·size, height = 2·size.
-    const HEX_SIZE = 25;
-    const HEX_W = SQRT3 * HEX_SIZE;
-    const HEX_H = 2 * HEX_SIZE;
+    const BASE_HEX_SIZE = 25;
+    const BASE_FONT_PX = 13;
+    // Cap the badge cluster at a fixed footprint so it can't push the
+    // header (SCORE / BEST) off-screen as more achievements unlock. When
+    // the natural polyhex exceeds this, the hexes scale down to fit.
+    const MAX_W = 300;
+    const MAX_H = 220;
 
     // Stable shape per achievement set: same earns → same polyhex across
     // reloads, so the menu doesn't reshuffle every time it re-renders.
     const seed = hashString(earned.map((m) => m.id).sort().join("|"));
     const shape = buildPolyhexShape(earned.length, mulberry32(seed));
-    const positions = shape.map((a) => axialToPixel(a, HEX_SIZE));
 
-    let minX = Infinity,
-      maxX = -Infinity,
-      minY = Infinity,
-      maxY = -Infinity;
-    for (const p of positions) {
-      if (p.x - HEX_W / 2 < minX) minX = p.x - HEX_W / 2;
-      if (p.x + HEX_W / 2 > maxX) maxX = p.x + HEX_W / 2;
-      if (p.y - HEX_H / 2 < minY) minY = p.y - HEX_H / 2;
-      if (p.y + HEX_H / 2 > maxY) maxY = p.y + HEX_H / 2;
-    }
-    const width = maxX - minX;
-    const height = maxY - minY;
-    host.style.width = `${Math.ceil(width)}px`;
-    host.style.height = `${Math.ceil(height)}px`;
+    const measure = (size: number) => {
+      const w = SQRT3 * size;
+      const h = 2 * size;
+      const positions = shape.map((a) => axialToPixel(a, size));
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+      for (const p of positions) {
+        if (p.x - w / 2 < minX) minX = p.x - w / 2;
+        if (p.x + w / 2 > maxX) maxX = p.x + w / 2;
+        if (p.y - h / 2 < minY) minY = p.y - h / 2;
+        if (p.y + h / 2 > maxY) maxY = p.y + h / 2;
+      }
+      return { w, h, positions, minX, minY, width: maxX - minX, height: maxY - minY };
+    };
+
+    let m0 = measure(BASE_HEX_SIZE);
+    const scale = Math.min(1, MAX_W / m0.width, MAX_H / m0.height);
+    const layout = scale < 1 ? measure(BASE_HEX_SIZE * scale) : m0;
+    const fontPx = BASE_FONT_PX * scale;
+
+    host.style.width = `${Math.ceil(layout.width)}px`;
+    host.style.height = `${Math.ceil(layout.height)}px`;
 
     host.innerHTML = earned
       .map((m, i) => {
-        const p = positions[i];
-        const left = p.x - HEX_W / 2 - minX;
-        const top = p.y - HEX_H / 2 - minY;
-        return `<span class="achievement-badge" style="--badge-tint:${m.tint}; left:${left.toFixed(2)}px; top:${top.toFixed(2)}px; width:${HEX_W.toFixed(2)}px; height:${HEX_H.toFixed(2)}px;" title="${escapeHtml(m.name)} — ${escapeHtml(m.description)}">${escapeHtml(m.badge)}</span>`;
+        const p = layout.positions[i];
+        const left = p.x - layout.w / 2 - layout.minX;
+        const top = p.y - layout.h / 2 - layout.minY;
+        return `<span class="achievement-badge" style="--badge-tint:${m.tint}; left:${left.toFixed(2)}px; top:${top.toFixed(2)}px; width:${layout.w.toFixed(2)}px; height:${layout.h.toFixed(2)}px; font-size:${fontPx.toFixed(2)}px;" title="${escapeHtml(m.name)} — ${escapeHtml(m.description)}">${escapeHtml(m.badge)}</span>`;
       })
       .join("");
   }
