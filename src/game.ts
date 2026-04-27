@@ -1604,9 +1604,12 @@ export class Game {
 
     ctx.shadowBlur = 0;
 
-    // Big "ROTATE" label above the arrow.
-    const fontSize = Math.max(36, Math.round(this.hexSize * 2.4));
-    ctx.font = `900 ${fontSize}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
+    // Big "ROTATE" label above the arrow. Same spacey monospace as the
+    // kind-hint labels — 700-weight, wide letter-spacing — and ~20%
+    // smaller than the prior 900-weight system sans-serif.
+    const fontSize = Math.max(28, Math.round(this.hexSize * 1.92));
+    ctx.font = `700 ${fontSize}px ui-monospace, "SF Mono", Menlo, Consolas, monospace`;
+    (ctx as CanvasRenderingContext2D & { letterSpacing?: string }).letterSpacing = "0.16em";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     const labelY = Math.max(
