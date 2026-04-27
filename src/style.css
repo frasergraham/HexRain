@@ -19,6 +19,7 @@ body {
 }
 
 #app {
+  position: relative;
   display: flex;
   flex-direction: column;
   height: 100dvh;
@@ -27,28 +28,43 @@ body {
 }
 
 .hud {
+  position: absolute;
+  top: max(8px, env(safe-area-inset-top));
+  left: 0;
+  right: 0;
+  z-index: 5;
   display: flex;
   justify-content: space-between;
   align-items: baseline;
-  padding: 12px 16px 8px;
+  padding: 4px 14px;
   font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+.hud-left,
+.hud-right {
+  display: flex;
+  align-items: baseline;
 }
 
 .hud .label {
-  font-size: 11px;
-  letter-spacing: 0.18em;
-  color: #6f7aa6;
-  margin-right: 8px;
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  color: #aab4dc;
+  margin-right: 6px;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.85), 0 0 6px rgba(0, 0, 0, 0.7);
 }
 
 .hud .value {
-  font-size: 28px;
+  font-size: 24px;
   font-weight: 700;
   letter-spacing: 0.04em;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9), 0 0 10px rgba(13, 15, 28, 0.95),
+    0 0 18px rgba(13, 15, 28, 0.6);
 }
 
 .hud-right .value {
-  color: #b9c0e8;
+  color: #d2d9f5;
 }
 
 .stage {

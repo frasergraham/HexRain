@@ -132,10 +132,18 @@ interface Drone {
   pulse: number;
 }
 
+const PARALLAX_DEEP = 3; // px max horizontal shift of the deep plane
 const PARALLAX_BACK = 8; // px max horizontal shift of the back plane
 const PARALLAX_FRONT = 22; // px max horizontal shift of the front plane
+const STAR_SCROLL_DEEP = 2; // px/sec downward drift of the deep plane
 const STAR_SCROLL_BACK = 6; // px/sec downward drift of the back plane
 const STAR_SCROLL_FRONT = 18; // px/sec downward drift of the front plane
+
+// Score thresholds where the starfield density bumps up a tier and the
+// background nebula fades further into view. Tier 0 is the launch state.
+const STAR_TIER_THRESHOLDS = [200, 400, 600] as const;
+const NEBULA_INTENSITY_BY_TIER = [0, 0.35, 0.7, 1.0] as const;
+const NEBULA_SCROLL_SPEED = 4; // px/sec downward drift of the nebula
 
 const HINT_TIMESCALE = 0.5; // game runs at this rate while a hint cluster is on screen
 const ROTATE_TUTORIAL_TIMESCALE = 0.25; // even slower while teaching the rotate gesture
@@ -201,12 +209,24 @@ export class Game {
   private pinch = 0;
   private pinchTarget = 0;
 
-  // Two-plane starfield. Generated on resize, drawn behind everything with
-  // a small horizontal parallax based on the player's x position and a
-  // slow downward scroll that gives a sense of moving forward.
+  // Three-plane starfield. Generated on resize and whenever the score
+  // crosses a tier threshold, drawn behind everything with a small
+  // horizontal parallax based on the player's x position and a slow
+  // downward scroll that gives a sense of moving forward. Density scales
+  // up at score 200/400/600.
+  private starsDeep: Star[] = [];
   private starsBack: Star[] = [];
   private starsFront: Star[] = [];
   private starScrollY = 0;
+  private starTier = 0;
+
+  // Nebula plane: a pre-rendered offscreen image of soft coloured blobs
+  // that tiles vertically and slowly drifts downward behind the stars.
+  // Eased in by `nebulaIntensity`, which targets a per-tier value so the
+  // background grows richer as the player progresses.
+  private nebulaCanvas: HTMLCanvasElement | null = null;
+  private nebulaIntensity = 0;
+  private nebulaScrollY = 0;
 
   // Floating-text feedback (e.g. "+5" on coin pickup, "3X" on fast pickup).
   // Each floater rises and fades over a short lifetime.
@@ -605,8 +625,14 @@ export class Game {
   private update(dt: number): void {
     if (this.state === "paused") return;
 
-    // Starfield drifts downward in real time during menu, play and gameover.
+    // Starfield + nebula drift downward in real time during menu, play
+    // and gameover. The nebula intensity eases toward the tier target so
+    // it never pops in abruptly when the score crosses a threshold.
     this.starScrollY += dt;
+    this.nebulaScrollY += dt;
+    this.updateStarTier();
+    const nebulaTarget = NEBULA_INTENSITY_BY_TIER[this.starTier] ?? 1;
+    this.nebulaIntensity += (nebulaTarget - this.nebulaIntensity) * (1 - Math.exp(-dt * 0.6));
 
     // Tick floating score popups (always real time so they don't slow with
     // a slow-mo effect — UI feedback should be instantly readable).
@@ -2053,11 +2079,59 @@ export class Game {
     this.player.setHexSize(this.hexSize);
     this.player.setCenter(this.boardOriginX + this.boardWidth / 2, this.playerY - this.hexSize);
 
-    // Regenerate starfield to fit the new canvas dimensions. Two planes:
-    // a denser back plane of small dim stars, and a sparser front plane of
-    // brighter ones that parallax further when the player moves.
-    this.starsBack = generateStars(cssW, cssH, Math.round(cssW * cssH / 4500), 0.4, 0.9, 0.25);
-    this.starsFront = generateStars(cssW, cssH, Math.round(cssW * cssH / 11000), 0.9, 1.7, 0.6);
+    // Regenerate starfield to fit the new canvas dimensions. Three planes
+    // at the current density tier: a faint deep plane of pinprick stars, a
+    // back plane of small dim ones, and a sparser front plane of brighter
+    // ones that parallax further when the player moves.
+    this.regenerateStarfield(cssW, cssH);
+
+    // Nebula tiles vertically; size it to the canvas so a single tile
+    // covers the screen and we can wrap by drawing twice with a y offset.
+    this.nebulaCanvas = generateNebula(cssW, cssH);
+  }
+
+  private updateStarTier(): void {
+    let tier = 0;
+    for (const t of STAR_TIER_THRESHOLDS) {
+      if (this.score >= t) tier += 1;
+    }
+    if (tier !== this.starTier) {
+      this.starTier = tier;
+      const rect = this.canvas.getBoundingClientRect();
+      this.regenerateStarfield(Math.max(1, rect.width), Math.max(1, rect.height));
+    }
+  }
+
+  private regenerateStarfield(cssW: number, cssH: number): void {
+    // Density multiplier per tier — tier 0 is already a touch denser than
+    // before to make the starfield more prominent at the start; each tier
+    // adds another layer of richness that peaks at score 600.
+    const tierMul = 1 + this.starTier * 0.45;
+    const area = cssW * cssH;
+    this.starsDeep = generateStars(
+      cssW,
+      cssH,
+      Math.round((area / 2200) * tierMul),
+      0.25,
+      0.6,
+      0.15,
+    );
+    this.starsBack = generateStars(
+      cssW,
+      cssH,
+      Math.round((area / 3600) * tierMul),
+      0.4,
+      1.0,
+      0.4,
+    );
+    this.starsFront = generateStars(
+      cssW,
+      cssH,
+      Math.round((area / 9000) * tierMul),
+      0.9,
+      1.9,
+      0.7,
+    );
   }
 
   private drawStarfield(canvasW: number, canvasH: number): void {
@@ -2070,12 +2144,36 @@ export class Game {
 
     drawStarLayer(
       ctx,
+      this.starsDeep,
+      canvasW,
+      canvasH,
+      -offset * PARALLAX_DEEP,
+      this.starScrollY * STAR_SCROLL_DEEP,
+      "#5b6da0",
+    );
+
+    // Nebula sits between the deep + back planes so foreground stars still
+    // sparkle on top of it. Drawn twice so the tile wraps smoothly.
+    if (this.nebulaCanvas && this.nebulaIntensity > 0.01) {
+      const neb = this.nebulaCanvas;
+      const tileH = neb.height;
+      const sy = ((this.nebulaScrollY * NEBULA_SCROLL_SPEED) % tileH + tileH) % tileH;
+      ctx.save();
+      ctx.globalCompositeOperation = "lighter";
+      ctx.globalAlpha = Math.max(0, Math.min(1, this.nebulaIntensity));
+      ctx.drawImage(neb, 0, sy - tileH);
+      ctx.drawImage(neb, 0, sy);
+      ctx.restore();
+    }
+
+    drawStarLayer(
+      ctx,
       this.starsBack,
       canvasW,
       canvasH,
       -offset * PARALLAX_BACK,
       this.starScrollY * STAR_SCROLL_BACK,
-      "#7d97cc",
+      "#9fb4e6",
     );
     drawStarLayer(
       ctx,
@@ -2096,9 +2194,10 @@ export class Game {
     // Two-plane parallax starfield, drawn first so everything else covers it.
     this.drawStarfield(rect.width, rect.height);
 
-    // Board background — slightly translucent so stars subtly show through
-    // the play area instead of being limited to the side margins.
-    ctx.fillStyle = "rgba(14, 17, 36, 0.82)";
+    // Board background — translucent so the starfield (and nebula at
+    // higher scores) reads through the play area rather than being a
+    // near-opaque slab on top of it.
+    ctx.fillStyle = "rgba(14, 17, 36, 0.45)";
     ctx.fillRect(this.boardOriginX, this.boardOriginY, this.boardWidth, this.boardHeight);
 
     // Pinch panels: dim slabs slide in from the sides when the play area is
@@ -2225,6 +2324,35 @@ function generateStars(
     });
   }
   return out;
+}
+
+// Pre-render a tile of soft coloured nebula blobs into an offscreen canvas.
+// Blobs are kept clear of the top + bottom edges so the tile wraps
+// vertically without a visible seam. Cool/warm colours are mixed with the
+// `lighter` composite so they read as glow rather than paint.
+function generateNebula(w: number, h: number): HTMLCanvasElement {
+  const c = document.createElement("canvas");
+  c.width = Math.max(1, Math.round(w));
+  c.height = Math.max(1, Math.round(h));
+  const cx = c.getContext("2d");
+  if (!cx) return c;
+  const blobs: Array<{ x: number; y: number; r: number; color: string }> = [
+    { x: 0.18 * w, y: 0.30 * h, r: Math.min(w, h) * 0.42, color: "rgba(120, 80, 200, 0.55)" },
+    { x: 0.78 * w, y: 0.55 * h, r: Math.min(w, h) * 0.50, color: "rgba(70, 150, 220, 0.45)" },
+    { x: 0.45 * w, y: 0.78 * h, r: Math.min(w, h) * 0.36, color: "rgba(210, 90, 160, 0.42)" },
+    { x: 0.62 * w, y: 0.20 * h, r: Math.min(w, h) * 0.30, color: "rgba(90, 200, 220, 0.35)" },
+    { x: 0.30 * w, y: 0.62 * h, r: Math.min(w, h) * 0.28, color: "rgba(180, 110, 230, 0.30)" },
+  ];
+  cx.globalCompositeOperation = "lighter";
+  for (const b of blobs) {
+    const g = cx.createRadialGradient(b.x, b.y, 0, b.x, b.y, b.r);
+    g.addColorStop(0, b.color);
+    g.addColorStop(0.55, b.color.replace(/[0-9.]+\)$/, "0.10)"));
+    g.addColorStop(1, "rgba(0, 0, 0, 0)");
+    cx.fillStyle = g;
+    cx.fillRect(0, 0, c.width, c.height);
+  }
+  return c;
 }
 
 function drawStarLayer(
