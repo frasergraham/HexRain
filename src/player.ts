@@ -357,20 +357,40 @@ export class Player {
 
   private rebuildBody(): void {
     const oldBody = this.body;
-    const pos = { ...oldBody.position };
     const angle = oldBody.angle;
     const vel = { ...oldBody.velocity };
     const angVel = oldBody.angularVelocity;
 
+    // Anchor: world position of an existing cell before the rebuild. The
+    // new compound body's centroid sits at a different point than the
+    // old one (the new cell shifts the COM), so if we just kept
+    // body.position the existing cells would all jump by the COM delta —
+    // visible as a pop on every addCell. Translate the new body so the
+    // anchor cell lands exactly where it was, and Matter's centroid
+    // shift becomes invisible.
+    const anchorCell = this.cells[0]!;
+    const anchorWorld = this.cellWorldCenter(anchorCell);
+
     const built = buildPlayerBody(
       this.cells,
       this.hexSize,
-      pos.x,
-      pos.y,
+      0,
+      0,
       this.collisionCategory,
       this.collisionMask,
     );
     Body.setAngle(built.body, angle);
+
+    const anchorPart = built.partsByAxial.get(axialKey(anchorCell));
+    if (anchorPart) {
+      const dx = anchorWorld.x - anchorPart.position.x;
+      const dy = anchorWorld.y - anchorPart.position.y;
+      Body.setPosition(built.body, {
+        x: built.body.position.x + dx,
+        y: built.body.position.y + dy,
+      });
+    }
+
     Body.setVelocity(built.body, vel);
     Body.setAngularVelocity(built.body, angVel);
 
