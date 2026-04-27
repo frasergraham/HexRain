@@ -4,9 +4,17 @@ import GameKit
 import UIKit
 
 @objc(GameCenterPlugin)
-public class GameCenterPlugin: CAPPlugin {
+public class GameCenterPlugin: CAPPlugin, CAPBridgedPlugin {
+    public let identifier = "GameCenterPlugin"
+    public let jsName = "GameCenter"
+    public let pluginMethods: [CAPPluginMethod] = [
+        CAPPluginMethod(name: "authenticate", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "submitScore", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "reportAchievement", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "loadAchievements", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "showLeaderboard", returnType: CAPPluginReturnPromise),
+    ]
 
-    private var pendingAuthCalls: [CAPPluginCall] = []
     private var didTryAuth = false
 
     @objc func authenticate(_ call: CAPPluginCall) {
@@ -20,8 +28,6 @@ public class GameCenterPlugin: CAPPlugin {
         // Game Center will replay the handler whenever auth state changes,
         // so we have to be careful to only resolve the *current* call once.
         if didTryAuth {
-            // Auth has already been attempted; the current state is whatever
-            // GKLocalPlayer reports right now.
             call.resolve(["authenticated": local.isAuthenticated])
             return
         }
@@ -31,7 +37,6 @@ public class GameCenterPlugin: CAPPlugin {
             guard let self = self else { return }
 
             if let vc = viewController {
-                // GameKit needs us to present its sign-in UI.
                 DispatchQueue.main.async {
                     self.bridge?.viewController?.present(vc, animated: true, completion: nil)
                 }
@@ -109,10 +114,8 @@ public class GameCenterPlugin: CAPPlugin {
         }
     }
 
-    /// Returns the IDs of every achievement the player has fully completed in
-    /// Game Center. Used by the JS layer to seed the local earned-set on
-    /// launch so cross-device unlocks (or reinstalls) show up in the menu's
-    /// achievement polyhex without the player having to re-earn them.
+    // Returns IDs of every achievement the player has fully completed in
+    // Game Center, so the JS layer can seed the local earned-set on launch.
     @objc func loadAchievements(_ call: CAPPluginCall) {
         guard GKLocalPlayer.local.isAuthenticated else {
             call.reject("Game Center not authenticated")
@@ -157,8 +160,7 @@ public class GameCenterPlugin: CAPPlugin {
     }
 }
 
-/// Shared dismiss handler for `GKGameCenterViewController`. GameKit requires a
-/// non-nil delegate to dismiss; the default behaviour is fine for us.
+// GameKit requires a non-nil delegate to dismiss the leaderboard sheet.
 class GameCenterDelegateProxy: NSObject, GKGameCenterControllerDelegate {
     static let shared = GameCenterDelegateProxy()
 

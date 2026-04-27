@@ -8,20 +8,20 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "build:ios": "tsc && vite build --base=./ --outDir=dist --emptyOutDir",
-    "ios:add": "cap add ios",
+    "ios:add": "cap add ios --packagemanager SPM",
     "ios:sync": "npm run build:ios && cap sync ios",
     "ios:copy": "npm run build:ios && cap copy ios",
     "ios:open": "cap open ios"
   },
   "devDependencies": {
-    "@capacitor/cli": "^6.1.2",
+    "@capacitor/cli": "^8.3.1",
     "@types/matter-js": "^0.20.2",
     "typescript": "^5.6.3",
     "vite": "^5.4.10"
   },
   "dependencies": {
-    "@capacitor/core": "^6.1.2",
-    "@capacitor/ios": "^6.1.2",
+    "@capacitor/core": "^8.3.1",
+    "@capacitor/ios": "^8.3.1",
     "matter-js": "^0.20.0"
   }
 }

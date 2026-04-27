@@ -388,6 +388,10 @@ export class Game {
   private boardOriginX = 0;
   private boardOriginY = 0;
   private playerY = 0;
+  // Pixels at the top of the canvas obscured by the absolute-positioned
+  // HUD (score/best) and the iOS Dynamic Island / safe-area inset.
+  // Measured at resize time from the .hud element's bottom edge.
+  private topInset = 0;
 
   private lastTime = 0;
   private rafId = 0;
@@ -1171,6 +1175,18 @@ export class Game {
       const yMax = this.boardOriginY + this.boardHeight - margin;
       const y = Math.max(yMin, Math.min(yMax, yIdeal));
 
+      // Fade in as the label clears the HUD/Dynamic Island band: fully
+      // hidden while the label's top is inside the inset, fully visible
+      // once it has descended one font-size past it.
+      const labelTop = y - fontSize;
+      const fadeStart = this.boardOriginY + this.topInset;
+      const fadeEnd = fadeStart + fontSize;
+      const alpha = fadeEnd > fadeStart
+        ? Math.max(0, Math.min(1, (labelTop - fadeStart) / (fadeEnd - fadeStart)))
+        : 1;
+      if (alpha <= 0) continue;
+      ctx.globalAlpha = alpha;
+
       ctx.shadowColor = palette.glow;
       ctx.shadowBlur = 26;
       ctx.fillStyle = palette.fill;
@@ -1179,6 +1195,7 @@ export class Game {
       ctx.lineWidth = 3;
       ctx.strokeStyle = palette.stroke;
       ctx.strokeText(c.hintLabel, cx, y);
+      ctx.globalAlpha = 1;
     }
 
     if (drewAny) ctx.restore();
@@ -2735,6 +2752,17 @@ export class Game {
     this.boardHeight = cssH;
     this.boardOriginX = 0;
     this.boardOriginY = 0;
+
+    // Measure the HUD's bottom edge in canvas-local pixels so on-canvas
+    // chrome (countdown bar, hint labels) can keep clear of the score row
+    // and the iOS Dynamic Island that sits above it.
+    const hudEl = document.querySelector<HTMLElement>(".hud");
+    if (hudEl) {
+      const hudRect = hudEl.getBoundingClientRect();
+      this.topInset = Math.max(0, hudRect.bottom - rect.top + 8);
+    } else {
+      this.topInset = 0;
+    }
     // playerY is the rail Y — the line on which the player's lowest pixel
     // sits, just above the very bottom of the canvas.
     this.playerY = this.boardOriginY + this.boardHeight - RAIL_BOTTOM_INSET;
@@ -2941,7 +2969,7 @@ export class Game {
       const frac = Math.max(0, this.timeEffectTimer / this.timeEffectMax);
       const w = this.boardWidth * 0.95;
       const x0 = this.boardOriginX + (this.boardWidth - w) / 2;
-      const y0 = this.boardOriginY + 6;
+      const y0 = this.boardOriginY + this.topInset + 6;
       const color = this.timeEffect === "slow" ? "#ffd76b" : "#7fe89c";
       ctx.fillStyle = "rgba(255, 255, 255, 0.08)";
       ctx.fillRect(x0, y0, w, 6);
