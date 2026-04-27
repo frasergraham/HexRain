@@ -1,4 +1,12 @@
-import { Bodies, Body, Composite, Engine, Events, type IEventCollision } from "matter-js";
+import {
+  Bodies,
+  Body,
+  Composite,
+  Constraint,
+  Engine,
+  Events,
+  type IEventCollision,
+} from "matter-js";
 import { COIN_SHAPE, FallingCluster, hintPalette, kindLabel, pickShape } from "./cluster";
 import { DebrisHex } from "./debris";
 import {
@@ -11,10 +19,18 @@ import {
   setAchievementListener,
   submitScore as gcSubmitScore,
 } from "./gameCenter";
-import { axialToPixel, buildPolyhexShape, hashString, mulberry32, SQRT3 } from "./hex";
+import {
+  axialKey,
+  axialToPixel,
+  buildPolyhexShape,
+  hashString,
+  mulberry32,
+  pathHex,
+  SQRT3,
+} from "./hex";
 import { bindCanvasSlide, bindInput, bindSlider, isTouchDevice } from "./input";
 import { Player } from "./player";
-import type { ClusterKind, GameState, InputAction, Shape } from "./types";
+import type { Axial, ClusterKind, GameState, InputAction, Shape } from "./types";
 
 const SCORE_MILESTONES: ReadonlyArray<{ threshold: number; id: AchievementId }> = [
   { threshold: 200, id: ACHIEVEMENTS.score200 },
@@ -38,6 +54,15 @@ const SPAWN_INTERVAL_RAMP = 0.03;
 const DANGER_SIZE = 7;
 const LOSE_COMBO = 2;
 const STICK_INVULN_MS = 180;
+
+// Stick-in-flight tuning. When a blue cluster part lands a hit it spawns a
+// small unrooted hex body, sprung to the player's target cell, that whips
+// into place over a few hundred ms. Once it's close enough, addCell fires
+// and the body is removed.
+const STICK_FLIGHT_LIFETIME = 0.45; // seconds before we force-snap
+const STICK_FLIGHT_SNAP_DIST_FRAC = 0.35; // fraction of hexSize → addCell
+const STICK_FLIGHT_STIFFNESS = 0.07;
+const STICK_FLIGHT_DAMPING = 0.18;
 
 const STICKY_SPAWN_CHANCE = 0.10;
 const STICKY_MIN_SCORE = 3;
@@ -117,6 +142,14 @@ interface Floater {
   // fast-bonus payout to make survival feel like a real reward.
   grand: boolean;
   peakScale: number;
+}
+
+interface StickInFlight {
+  body: Body;
+  constraint: Constraint;
+  targetCell: Axial;
+  age: number;
+  lifetime: number;
 }
 
 interface Drone {
@@ -240,6 +273,11 @@ export class Game {
   // Active drones — small mid-screen sentinels that intercept clusters
   // and shatter them on contact. Multiple drones can be active.
   private drones: Drone[] = [];
+
+  // Hex bodies sprung toward the player while waiting to be snapped onto
+  // it as a real cell. Spawned by handleNormalContact and ticked every
+  // frame; collide with nothing so they don't disturb other clusters.
+  private sticksInFlight: StickInFlight[] = [];
 
   // ROTATE tutorial: fires once per page session the first time the
   // player grows from 1 → 2 hexes. Slows the game to 0.25x and shows a
@@ -543,7 +581,14 @@ export class Game {
   private debugRun = false;
 
   private startOrRestart(initialScore = 0): void {
-    // Tear down all existing physics bodies.
+    // Tear down all existing physics bodies. Sticks-in-flight reference
+    // the player body via their spring constraint, so unhook them before
+    // the player body is removed.
+    for (const s of this.sticksInFlight) {
+      Composite.remove(this.engine.world, s.constraint);
+      Composite.remove(this.engine.world, s.body);
+    }
+    this.sticksInFlight = [];
     for (const c of this.clusters) Composite.remove(this.engine.world, c.body);
     for (const d of this.debris) Composite.remove(this.engine.world, d.body);
     Composite.remove(this.engine.world, this.player.body);
@@ -762,6 +807,11 @@ export class Game {
 
     // Drone update: oscillate horizontally, age out, despawn dead bodies.
     this.updateDrones(dt);
+
+    // Tick stick-in-flight pieces: re-aim their springs at the player's
+    // updated cell-target world position and snap them in once close
+    // enough (or after a hard timeout).
+    this.updateSticksInFlight(dt);
 
     // Wave/calm phase progression — uses gameDt so wave length feels right
     // during slow-mo, but spawn cadence is the same dilation.
@@ -1515,7 +1565,6 @@ export class Game {
     // already in the danger zone. Otherwise a fast 5→6→7 combo would end
     // the run before the danger glow ever appears.
     const wasInDanger = this.player.size() >= DANGER_SIZE;
-    const sizeBefore = this.player.size();
 
     // Bigger blocks bite harder, but a notch gentler than sticky removes:
     // 1–3 hex clusters stick 1, 4 sticks 2, 5 sticks 3 (max(1, N-2)). Each
@@ -1530,22 +1579,34 @@ export class Game {
       }))
       .sort((a, b) => a.d - b.d);
 
+    // Cells reserved by either an existing stick-in-flight or a stick we
+    // queue in this loop, so multiple parts of the same cluster don't
+    // pick the same target.
+    const reserved = new Set<string>(
+      this.sticksInFlight.map((s) => axialKey(s.targetCell)),
+    );
+
     const stuckPartIds = new Set<number>();
     let stuck = 0;
     for (const item of partsByDist) {
       if (stuck >= stickCount) break;
-      const cell = this.player.findStickCell(item.p.x, item.p.y);
+      const cell = this.player.findStickCell(item.p.x, item.p.y, reserved);
       if (!cell) continue;
-      this.player.addCell(cell);
+      reserved.add(axialKey(cell));
+      this.spawnStickInFlight(cell, item.p, cluster);
       stuckPartIds.add(item.p.partId);
       stuck += 1;
     }
+    // Prevent the same blue cluster from being scored as a "passed without
+    // contact" point at end of play. (The cluster is killed below.)
 
     if (stuck > 0) {
       // Brief slow-mo buffer so the player can recover their bearings after
       // a hit. Stacks with an existing slow effect by extending the timer
       // rather than truncating; overrides a fast effect (slow > fast for
-      // recovery).
+      // recovery). Slow-mo fires at impact, even though the new hex hasn't
+      // physically merged yet — gives the player time to read the
+      // sucking-in animation before the next hit.
       if (this.timeEffect === "slow") {
         this.timeEffectTimer = Math.max(this.timeEffectTimer, STICK_SLOW_BUFFER);
       } else {
@@ -1554,15 +1615,10 @@ export class Game {
         this.timeEffectTimer = STICK_SLOW_BUFFER;
         this.timeEffectMax = STICK_SLOW_BUFFER;
       }
-      // First time the blob ever grows past one hex this page session,
-      // teach the rotate gesture: big label + curved arrow + 0.25x slow.
-      if (sizeBefore === 1 && this.player.size() > 1 && !this.rotateTutorialShown) {
-        this.rotateTutorialShown = true;
-        this.rotateTutorialActive = true;
-        this.rotateTutorialTimer = 0;
-        this.rotateTutorialStartAngle = this.player.body.angle;
-      }
     }
+    // Tutorial trigger for the very first 1→2 growth fires at completion
+    // time inside completeStickInFlight, since size only changes when the
+    // hex actually lands.
 
     // Spawn debris for the cluster parts that didn't stick.
     for (const p of allParts) {
@@ -1610,6 +1666,135 @@ export class Game {
     const d = DebrisHex.spawn({ ...opts, hexSize: this.hexSize });
     this.debris.push(d);
     Composite.add(this.engine.world, d.body);
+  }
+
+  private spawnStickInFlight(
+    targetCell: Axial,
+    part: { x: number; y: number; angle: number; partId: number },
+    cluster: FallingCluster,
+  ): void {
+    // Free hex body that the spring will yank into the player. Collides
+    // with nothing — purely visual + physics-driven motion.
+    const body = Bodies.polygon(part.x, part.y, 6, this.hexSize, {
+      friction: 0,
+      frictionAir: 0.04,
+      restitution: 0,
+      density: 0.0008,
+      label: "stickInFlight",
+      angle: part.angle,
+      collisionFilter: { category: 0x0020, mask: 0x0000 },
+    });
+    Body.setVelocity(body, {
+      x: cluster.body.velocity.x + (Math.random() - 0.5) * 1.5,
+      y: cluster.body.velocity.y + (Math.random() - 0.5) * 1.5,
+    });
+    Body.setAngularVelocity(
+      body,
+      cluster.body.angularVelocity + (Math.random() - 0.5) * 0.3,
+    );
+
+    // pointA is in the player's body-local frame relative to body.position
+    // (Matter rotates it with the body each step). Updated in
+    // updateSticksInFlight when the player rebuilds and the COM shifts.
+    const local = axialToPixel(targetCell, this.hexSize);
+    const pointA = {
+      x: local.x - this.player.comOffsetLocal.x,
+      y: local.y - this.player.comOffsetLocal.y,
+    };
+
+    const constraint = Constraint.create({
+      bodyA: this.player.body,
+      pointA,
+      bodyB: body,
+      pointB: { x: 0, y: 0 },
+      stiffness: STICK_FLIGHT_STIFFNESS,
+      damping: STICK_FLIGHT_DAMPING,
+      length: 0,
+    });
+
+    Composite.add(this.engine.world, body);
+    Composite.add(this.engine.world, constraint);
+
+    this.sticksInFlight.push({
+      body,
+      constraint,
+      targetCell,
+      age: 0,
+      lifetime: STICK_FLIGHT_LIFETIME,
+    });
+  }
+
+  private updateSticksInFlight(dt: number): void {
+    if (this.sticksInFlight.length === 0) return;
+    const snapDist = this.hexSize * STICK_FLIGHT_SNAP_DIST_FRAC;
+    const remaining: StickInFlight[] = [];
+    for (const s of this.sticksInFlight) {
+      s.age += dt;
+      // Re-anchor the spring against the player's CURRENT body. addCell
+      // rebuilds the body, which swaps body identity and shifts the COM,
+      // so we patch bodyA + pointA every frame to stay glued to the
+      // intended target slot.
+      s.constraint.bodyA = this.player.body;
+      const local = axialToPixel(s.targetCell, this.hexSize);
+      s.constraint.pointA.x = local.x - this.player.comOffsetLocal.x;
+      s.constraint.pointA.y = local.y - this.player.comOffsetLocal.y;
+
+      const target = this.player.projectedCellWorldCenter(s.targetCell);
+      const dx = s.body.position.x - target.x;
+      const dy = s.body.position.y - target.y;
+      const dist = Math.hypot(dx, dy);
+
+      if (dist <= snapDist || s.age >= s.lifetime) {
+        this.completeStickInFlight(s);
+        continue;
+      }
+      remaining.push(s);
+    }
+    this.sticksInFlight = remaining;
+  }
+
+  private completeStickInFlight(s: StickInFlight): void {
+    Composite.remove(this.engine.world, s.constraint);
+    Composite.remove(this.engine.world, s.body);
+
+    const sizeBefore = this.player.size();
+    this.player.addCell(s.targetCell);
+
+    // First 1→2 growth this page session teaches the rotate gesture.
+    if (sizeBefore === 1 && this.player.size() > 1 && !this.rotateTutorialShown) {
+      this.rotateTutorialShown = true;
+      this.rotateTutorialActive = true;
+      this.rotateTutorialTimer = 0;
+      this.rotateTutorialStartAngle = this.player.body.angle;
+    }
+  }
+
+  private drawSticksInFlight(): void {
+    if (this.sticksInFlight.length === 0) return;
+    const ctx = this.ctx;
+    for (const s of this.sticksInFlight) {
+      const t = Math.min(1, s.age / Math.max(0.001, s.lifetime));
+      // Subtle scale pulse and a glow trail so the suck-in reads clearly.
+      const scale = 1 + 0.08 * Math.sin(t * Math.PI);
+      ctx.save();
+      ctx.translate(s.body.position.x, s.body.position.y);
+      ctx.rotate(s.body.angle);
+      ctx.scale(scale, scale);
+
+      pathHex(ctx, 0, 0, this.hexSize);
+      const grad = ctx.createLinearGradient(0, -this.hexSize, 0, this.hexSize);
+      grad.addColorStop(0, "#aac4ff");
+      grad.addColorStop(1, "#5b8bff");
+      ctx.fillStyle = grad;
+      ctx.shadowColor = "rgba(170, 196, 255, 0.85)";
+      ctx.shadowBlur = 14;
+      ctx.fill();
+      ctx.shadowBlur = 0;
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = "#1c2348";
+      ctx.stroke();
+      ctx.restore();
+    }
   }
 
   private handleStickyContact(cluster: FallingCluster, contact: ContactInfo): void {
@@ -2087,6 +2272,26 @@ export class Game {
         kind: "normal",
       });
     }
+    // Drop any sticks-in-flight onto the wreckage as debris — they were
+    // anchored to a body that's about to disappear.
+    for (const s of this.sticksInFlight) {
+      this.spawnDebris({
+        x: s.body.position.x,
+        y: s.body.position.y,
+        angle: s.body.angle,
+        velocity: s.body.velocity,
+        angularVelocity: s.body.angularVelocity,
+        impulse: {
+          x: (Math.random() - 0.5) * 4,
+          y: -2 - Math.random() * 2,
+        },
+        kind: "normal",
+      });
+      Composite.remove(this.engine.world, s.constraint);
+      Composite.remove(this.engine.world, s.body);
+    }
+    this.sticksInFlight = [];
+
     Composite.remove(this.engine.world, this.player.body);
 
 
@@ -2302,6 +2507,7 @@ export class Game {
     if (this.state !== "gameover") {
       this.drawShield();
       this.player.draw(ctx);
+      this.drawSticksInFlight();
     }
 
     // Big first-appearance hint label above each cluster that carries

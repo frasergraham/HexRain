@@ -210,7 +210,13 @@ export class Player {
   cellWorldCenter(cell: Axial): { x: number; y: number } {
     const part = this.partsByAxial.get(axialKey(cell));
     if (part) return { x: part.position.x, y: part.position.y };
-    // Fallback (shouldn't be hit): compute from local frame.
+    return this.projectedCellWorldCenter(cell);
+  }
+
+  // World position of a cell that may or may not be in the player's blob
+  // yet. Used by the stick-in-flight system to point a spring constraint
+  // at the slot a hex is being pulled into before addCell is called.
+  projectedCellWorldCenter(cell: Axial): { x: number; y: number } {
     const local = axialToPixel(cell, this.hexSize);
     const dx = local.x - this.comOffsetLocal.x;
     const dy = local.y - this.comOffsetLocal.y;
@@ -234,9 +240,14 @@ export class Player {
     };
   }
 
-  findStickCell(worldX: number, worldY: number): Axial | null {
+  findStickCell(
+    worldX: number,
+    worldY: number,
+    reserved?: ReadonlySet<string>,
+  ): Axial | null {
     const local = this.worldToLocalAxial(worldX, worldY);
     const occupied = new Set(this.cells.map(axialKey));
+    if (reserved) for (const k of reserved) occupied.add(k);
     const candidate = pixelToAxial(local.x, local.y, this.hexSize);
 
     const candidates: Axial[] = [];
