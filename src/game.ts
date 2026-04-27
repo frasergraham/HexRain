@@ -47,6 +47,8 @@ interface DifficultyConfig {
   shieldMul: number;
   droneMul: number;
   effectDurationMul: number;
+  // Score at which the inward narrowing wave variant unlocks.
+  narrowingScore: number;
 }
 
 const DIFFICULTY_CONFIG: Record<Difficulty, DifficultyConfig> = {
@@ -58,6 +60,7 @@ const DIFFICULTY_CONFIG: Record<Difficulty, DifficultyConfig> = {
     shieldMul: 1.5,
     droneMul: 1.5,
     effectDurationMul: 1.2,
+    narrowingScore: 600,
   },
   medium: {
     fallSpeedMul: 1.0,
@@ -67,15 +70,17 @@ const DIFFICULTY_CONFIG: Record<Difficulty, DifficultyConfig> = {
     shieldMul: 1.0,
     droneMul: 1.0,
     effectDurationMul: 1.0,
+    narrowingScore: 600,
   },
   hard: {
-    fallSpeedMul: 1.2,
+    fallSpeedMul: 1.35,
     spawnIntervalMul: 0.85,
     stickyMul: 0.6,
     slowMul: 1.0,
     shieldMul: 0.6,
     droneMul: 0.6,
     effectDurationMul: 0.8,
+    narrowingScore: 200,
   },
 };
 
@@ -141,7 +146,6 @@ const SWARM_STICKY_CHANCE = 0.12; // chance a swarm hex spawns as a heal instead
 // Score thresholds for advanced spawn mechanics.
 const ANGLED_SPAWNS_SCORE = 200;
 const SIDE_SPAWNS_SCORE = 400;
-const NARROWING_SCORE = 600;
 
 const PLAYER_MOVE_SPEED = 5.5; // px/ms (Matter velocity units, keyboard hold)
 const PLAYER_ROT_SPEED = 0.05; // rad/ms (keyboard hold)
@@ -281,8 +285,9 @@ export class Game {
   private timeEffectMax = 1;
   private timeScale = 1;
 
-  // Optional inward-narrowing pinch active in late game (score >= NARROWING_SCORE).
-  // 0 = full board, 1 = fully pinched. Animates on/off.
+  // Optional inward-narrowing pinch active in late game (score >= the
+  // current difficulty's narrowingScore). 0 = full board, 1 = fully
+  // pinched. Animates on/off.
   private pinch = 0;
   private pinchTarget = 0;
 
@@ -2246,8 +2251,9 @@ export class Game {
     // Pick a fresh safe column. Swarm waves still respect this.
     const half = Math.floor(BOARD_COLS / 2);
     this.safeColumn = Math.floor(Math.random() * (half * 2 + 1)) - half;
-    // Late game: half of waves narrow the play area.
-    if (this.score >= NARROWING_SCORE && Math.random() < 0.5) {
+    // Late game: half of waves narrow the play area. Hard kicks this in
+    // earlier (200) than easy/medium (600).
+    if (this.score >= this.cfg().narrowingScore && Math.random() < 0.5) {
       this.pinchTarget = 0.35; // 35% inset from each side
     } else {
       this.pinchTarget = 0;
