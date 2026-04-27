@@ -13,6 +13,8 @@ export type Shape = Axial[];
 
 export type GameState = "menu" | "playing" | "paused" | "gameover";
 
+export type Difficulty = "easy" | "medium" | "hard";
+
 export type InputAction =
   | "left"
   | "right"

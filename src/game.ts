@@ -22,7 +22,7 @@ import {
 } from "./hex";
 import { bindCanvasSlide, bindInput, bindSlider, isTouchDevice } from "./input";
 import { Player } from "./player";
-import type { Axial, ClusterKind, GameState, InputAction, Shape } from "./types";
+import type { Axial, ClusterKind, Difficulty, GameState, InputAction, Shape } from "./types";
 
 const SCORE_MILESTONES: ReadonlyArray<{ threshold: number; id: AchievementId }> = [
   { threshold: 200, id: ACHIEVEMENTS.score200 },
@@ -34,6 +34,55 @@ const SCORE_MILESTONES: ReadonlyArray<{ threshold: number; id: AchievementId }> 
 
 const HEX_SIZE_BASE = 22;
 const BOARD_COLS = 9;
+
+// Difficulty knobs. Multipliers stack on top of the medium baseline:
+// fall speed (initial cluster velocity), spawn interval (how often
+// clusters arrive — bigger = slower), per-kind helpful spawn chances,
+// and timed-effect duration for shield / drone / slow.
+interface DifficultyConfig {
+  fallSpeedMul: number;
+  spawnIntervalMul: number;
+  stickyMul: number;
+  slowMul: number;
+  shieldMul: number;
+  droneMul: number;
+  effectDurationMul: number;
+}
+
+const DIFFICULTY_CONFIG: Record<Difficulty, DifficultyConfig> = {
+  easy: {
+    fallSpeedMul: 0.8,
+    spawnIntervalMul: 1.25,
+    stickyMul: 1.5,
+    slowMul: 1.5,
+    shieldMul: 1.5,
+    droneMul: 1.5,
+    effectDurationMul: 1.2,
+  },
+  medium: {
+    fallSpeedMul: 1.0,
+    spawnIntervalMul: 1.0,
+    stickyMul: 1.0,
+    slowMul: 1.0,
+    shieldMul: 1.0,
+    droneMul: 1.0,
+    effectDurationMul: 1.0,
+  },
+  hard: {
+    fallSpeedMul: 1.2,
+    spawnIntervalMul: 0.85,
+    stickyMul: 0.6,
+    slowMul: 1.0,
+    shieldMul: 0.6,
+    droneMul: 0.6,
+    effectDurationMul: 0.8,
+  },
+};
+
+const DIFFICULTY_STORAGE_KEY = "hexrain.difficulty";
+const DIFFICULTY_DEFAULT: Difficulty = "medium";
+const HIGH_SCORE_KEY_PREFIX = "hexrain.highScore.";
+const LEGACY_HIGH_SCORE_KEY = "hexrain.highScore";
 
 const BASE_FALL_SPEED = 1.6; // initial downward velocity for spawned clusters (px/ms)
 const SPEED_RAMP = 0.04; // px/ms per score
@@ -155,6 +204,7 @@ interface Drone {
   phase: number; // radians, advances with time
   speed: number; // radians per second
   lifetime: number; // seconds remaining
+  maxLifetime: number; // duration at spawn time, for HUD ratio
   pulse: number;
 }
 
@@ -186,6 +236,7 @@ export class Game {
   private bestEl: HTMLElement;
 
   private state: GameState = "menu";
+  private difficulty: Difficulty = DIFFICULTY_DEFAULT;
   private score = 0;
   private best = 0;
   private comboHits = 0;
@@ -324,7 +375,19 @@ export class Game {
     this.scoreEl = opts.scoreEl;
     this.bestEl = opts.bestEl;
 
-    this.best = Number(localStorage.getItem("hexrain.highScore") ?? 0) || 0;
+    // Migrate the original single-best key into the medium per-difficulty
+    // slot the first time we see it, then forget the legacy key.
+    const legacy = localStorage.getItem(LEGACY_HIGH_SCORE_KEY);
+    if (legacy != null) {
+      const mediumKey = HIGH_SCORE_KEY_PREFIX + "medium";
+      const existing = Number(localStorage.getItem(mediumKey) ?? 0) || 0;
+      const legacyN = Number(legacy) || 0;
+      if (legacyN > existing) localStorage.setItem(mediumKey, String(legacyN));
+      localStorage.removeItem(LEGACY_HIGH_SCORE_KEY);
+    }
+
+    this.difficulty = this.loadDifficulty();
+    this.best = this.loadBestFor(this.difficulty);
     this.bestEl.textContent = String(this.best);
 
     this.engine = Engine.create({
@@ -412,7 +475,18 @@ export class Game {
       };
     }
 
-    this.overlay.addEventListener("click", () => {
+    this.overlay.addEventListener("click", (e) => {
+      // Difficulty buttons live inside the overlay; treat their clicks as
+      // a selection change, not a tap-to-start. Event delegation works
+      // even after renderGameOver() rebuilds the overlay markup.
+      const target = e.target as HTMLElement | null;
+      const btn = target?.closest("button[data-difficulty]") as HTMLButtonElement | null;
+      if (btn) {
+        const value = btn.dataset.difficulty as Difficulty | undefined;
+        if (value) this.setDifficulty(value);
+        return;
+      }
+
       if (this.state === "paused") {
         this.state = "playing";
         this.overlay.classList.add("hidden");
@@ -634,12 +708,24 @@ export class Game {
   private renderMenu(): void {
     this.overlay.classList.remove("hidden");
     this.renderAchievementBadges();
+    this.refreshDifficultyButtons();
+  }
+
+  private difficultyButtonsHtml(): string {
+    return `
+      <div id="difficultyButtons" class="difficulty-buttons" role="group" aria-label="Difficulty">
+        <button type="button" data-difficulty="easy">EASY</button>
+        <button type="button" data-difficulty="medium">MEDIUM</button>
+        <button type="button" data-difficulty="hard">HARD</button>
+      </div>
+    `;
   }
 
   private renderGameOver(): void {
     this.overlay.innerHTML = `
       <h1>GAME OVER</h1>
       <p class="tagline">Score ${this.score} &middot; Best ${this.best}</p>
+      ${this.difficultyButtonsHtml()}
       <p class="hint">Tap to play again</p>
       <section class="achievements">
         <h2>Achievements</h2>
@@ -648,6 +734,7 @@ export class Game {
     `;
     this.overlay.classList.remove("hidden");
     this.renderAchievementBadges();
+    this.refreshDifficultyButtons();
   }
 
   private onInput(action: InputAction, pressed: boolean): void {
@@ -1292,7 +1379,7 @@ export class Game {
   }
 
   private handleShieldContact(cluster: FallingCluster): void {
-    this.shieldTimer = SHIELD_DURATION;
+    this.shieldTimer = SHIELD_DURATION * this.cfg().effectDurationMul;
     const center = cluster.body.position;
     this.spawnFloater(
       "SHIELD",
@@ -1402,7 +1489,7 @@ export class Game {
       ctx.restore();
 
       // Lifetime ring around the drone.
-      const t = Math.max(0, d.lifetime / DRONE_DURATION);
+      const t = Math.max(0, d.lifetime / d.maxLifetime);
       ctx.save();
       ctx.strokeStyle = "rgba(210, 170, 255, 0.6)";
       ctx.lineWidth = 2;
@@ -1486,7 +1573,8 @@ export class Game {
     const dx = (bounds.max.x - bounds.min.x) / 2;
     const dy = (bounds.max.y - bounds.min.y) / 2;
     const radius = Math.hypot(dx, dy) + this.hexSize * 0.5;
-    const t = Math.min(1, this.shieldTimer / SHIELD_DURATION);
+    const shieldMax = SHIELD_DURATION * this.cfg().effectDurationMul;
+    const t = Math.min(1, this.shieldTimer / shieldMax);
     const pulse = (Math.sin(performance.now() * 0.006) + 1) * 0.5;
 
     ctx.save();
@@ -1537,7 +1625,8 @@ export class Game {
       amplitude,
       phase: Math.random() * Math.PI * 2,
       speed: DRONE_OSCILLATION_SPEED,
-      lifetime: DRONE_DURATION,
+      lifetime: DRONE_DURATION * this.cfg().effectDurationMul,
+      maxLifetime: DRONE_DURATION * this.cfg().effectDurationMul,
       pulse: Math.random() * Math.PI * 2,
     });
   }
@@ -1896,8 +1985,9 @@ export class Game {
       }
       this.timeEffect = "slow";
       this.timeScale = SLOW_TIMESCALE;
-      this.timeEffectTimer = SLOW_EFFECT_DURATION;
-      this.timeEffectMax = SLOW_EFFECT_DURATION;
+      const slowDur = SLOW_EFFECT_DURATION * this.cfg().effectDurationMul;
+      this.timeEffectTimer = slowDur;
+      this.timeEffectMax = slowDur;
     } else if (cluster.kind === "fast") {
       // Each fast pickup stacks: level += 1, speed += 0.1, multiplier += 1.
       // Existing accumulated bonus carries into the new effect so combos
@@ -1962,12 +2052,13 @@ export class Game {
       }
     } else {
       const r = Math.random();
+      const cfg = this.cfg();
       const coinEnd = COIN_SPAWN_CHANCE;
-      const slowEnd = coinEnd + SLOW_SPAWN_CHANCE;
+      const slowEnd = coinEnd + SLOW_SPAWN_CHANCE * cfg.slowMul;
       const fastEnd = slowEnd + FAST_SPAWN_CHANCE;
-      const stickyEnd = fastEnd + STICKY_SPAWN_CHANCE;
-      const shieldEnd = stickyEnd + SHIELD_SPAWN_CHANCE;
-      const droneEnd = shieldEnd + DRONE_SPAWN_CHANCE;
+      const stickyEnd = fastEnd + STICKY_SPAWN_CHANCE * cfg.stickyMul;
+      const shieldEnd = stickyEnd + SHIELD_SPAWN_CHANCE * cfg.shieldMul;
+      const droneEnd = shieldEnd + DRONE_SPAWN_CHANCE * cfg.droneMul;
       if (r < coinEnd) {
         kind = "coin";
       } else if (this.score >= POWERUP_MIN_SCORE) {
@@ -2090,10 +2181,12 @@ export class Game {
       calmDuration: Math.max(2.5, 7 - s * 0.07),
       // Wave spawn cadence: faster than calm, scales with score.
       waveSpawnInterval: Math.max(0.32, 0.55 - s * 0.005),
-      // Calm spawn cadence: existing curve.
+      // Calm spawn cadence: existing curve, with the difficulty's
+      // starting interval scaling — easy waits longer, hard kicks off
+      // faster. The min floor still caps how tight it can get.
       calmSpawnInterval: Math.max(
         SPAWN_INTERVAL_MIN,
-        SPAWN_INTERVAL_START - s * SPAWN_INTERVAL_RAMP,
+        SPAWN_INTERVAL_START * this.cfg().spawnIntervalMul - s * SPAWN_INTERVAL_RAMP,
       ),
       // Wave fall speed multiplier on top of base.
       waveSpeedMul: Math.min(2.5, 1.5 + s * 0.015),
@@ -2107,9 +2200,12 @@ export class Game {
   }
 
   private computeFallSpeed(): number {
+    // Difficulty scales the starting velocity but not the per-score ramp,
+    // so easy/hard read as a different "starting pace" that converges
+    // toward the same late-game pressure.
     const base = Math.min(
       MAX_FALL_SPEED,
-      BASE_FALL_SPEED + this.score * SPEED_RAMP,
+      BASE_FALL_SPEED * this.cfg().fallSpeedMul + this.score * SPEED_RAMP,
     );
     if (this.wavePhase === "wave") {
       // Each cluster picks its own speed within ±30% of the wave-multiplier
@@ -2165,6 +2261,48 @@ export class Game {
     this.pinchTarget = 0;
   }
 
+  private loadDifficulty(): Difficulty {
+    const v = localStorage.getItem(DIFFICULTY_STORAGE_KEY);
+    if (v === "easy" || v === "medium" || v === "hard") return v;
+    return DIFFICULTY_DEFAULT;
+  }
+
+  private loadBestFor(d: Difficulty): number {
+    return Number(localStorage.getItem(HIGH_SCORE_KEY_PREFIX + d) ?? 0) || 0;
+  }
+
+  private saveBestFor(d: Difficulty, best: number): void {
+    localStorage.setItem(HIGH_SCORE_KEY_PREFIX + d, String(best));
+  }
+
+  // The active difficulty's tunable bundle.
+  private cfg(): DifficultyConfig {
+    return DIFFICULTY_CONFIG[this.difficulty];
+  }
+
+  private setDifficulty(d: Difficulty): void {
+    if (d === this.difficulty) return;
+    this.difficulty = d;
+    localStorage.setItem(DIFFICULTY_STORAGE_KEY, d);
+    this.best = this.loadBestFor(d);
+    this.bestEl.textContent = String(this.best);
+    // The gameover overlay bakes "Best {n}" into its innerHTML; re-render
+    // so it picks up the new difficulty's high score without the player
+    // having to play and die again to see it update.
+    if (this.state === "gameover") this.renderGameOver();
+    else this.refreshDifficultyButtons();
+  }
+
+  private refreshDifficultyButtons(): void {
+    const host = document.getElementById("difficultyButtons");
+    if (!host) return;
+    for (const btn of Array.from(host.querySelectorAll<HTMLButtonElement>("button[data-difficulty]"))) {
+      const value = btn.dataset.difficulty as Difficulty | undefined;
+      btn.classList.toggle("active", value === this.difficulty);
+      btn.setAttribute("aria-pressed", value === this.difficulty ? "true" : "false");
+    }
+  }
+
   // Inner left/right edges of the play area, accounting for the animated
   // pinch when active.
   currentRailLeft(): number {
@@ -2218,7 +2356,7 @@ export class Game {
     // are debug "skip-ahead" runs and the score isn't earned cleanly.
     if (!this.debugRun && this.score > this.best) {
       this.best = this.score;
-      localStorage.setItem("hexrain.highScore", String(this.best));
+      this.saveBestFor(this.difficulty, this.best);
       this.bestEl.textContent = String(this.best);
     }
     void gcSubmitScore(this.score);

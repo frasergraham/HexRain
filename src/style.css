@@ -238,6 +238,46 @@ body {
   pointer-events: none;
 }
 
+/* --- Difficulty buttons on the menu / game-over overlay --- */
+
+.difficulty-buttons {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  margin: 14px 0 16px;
+  flex-wrap: wrap;
+}
+
+.difficulty-buttons button {
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  padding: 8px 16px;
+  background: rgba(31, 36, 64, 0.55);
+  color: #b9c0e8;
+  border: 1px solid rgba(91, 139, 255, 0.35);
+  border-radius: 999px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: background 120ms, color 120ms, border-color 120ms,
+    box-shadow 120ms, transform 120ms;
+}
+
+.difficulty-buttons button:hover {
+  color: #e8ecff;
+  border-color: rgba(91, 139, 255, 0.7);
+}
+
+.difficulty-buttons button.active {
+  background: rgba(91, 139, 255, 0.92);
+  color: #0d0f1c;
+  border-color: #aac4ff;
+  box-shadow: 0 0 12px rgba(91, 139, 255, 0.6),
+    0 0 24px rgba(91, 139, 255, 0.35);
+  transform: translateY(-1px);
+}
+
 /* --- Debug start-at-score buttons (only present with ?debug=1) --- */
 
 .debug-buttons {
