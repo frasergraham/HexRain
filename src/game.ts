@@ -24,14 +24,30 @@ import { bindCanvasSlide, bindInput, bindSlider, isTouchDevice } from "./input";
 import { Player } from "./player";
 import type { Axial, ClusterKind, Difficulty, GameState, InputAction, Shape } from "./types";
 
-const SCORE_MILESTONES: ReadonlyArray<{ threshold: number; id: AchievementId }> = [
-  { threshold: 200, id: ACHIEVEMENTS.score200 },
-  { threshold: 400, id: ACHIEVEMENTS.score400 },
-  { threshold: 600, id: ACHIEVEMENTS.score600 },
-  { threshold: 800, id: ACHIEVEMENTS.score800 },
-  { threshold: 1000, id: ACHIEVEMENTS.score1000 },
-  { threshold: 1500, id: ACHIEVEMENTS.score1500 },
-];
+// Score-club achievements are difficulty-gated: easy earns none, medium
+// earns the standard ladder, and hard earns the Elite ladder. The
+// non-score achievements (bonus tiers, multiplier tiers, survivor,
+// trifecta) remain earnable on any difficulty.
+type Milestone = { threshold: number; id: AchievementId };
+const SCORE_MILESTONES_BY_DIFFICULTY: Record<Difficulty, ReadonlyArray<Milestone>> = {
+  easy: [],
+  medium: [
+    { threshold: 200, id: ACHIEVEMENTS.score200 },
+    { threshold: 400, id: ACHIEVEMENTS.score400 },
+    { threshold: 600, id: ACHIEVEMENTS.score600 },
+    { threshold: 800, id: ACHIEVEMENTS.score800 },
+    { threshold: 1000, id: ACHIEVEMENTS.score1000 },
+    { threshold: 1500, id: ACHIEVEMENTS.score1500 },
+  ],
+  hard: [
+    { threshold: 200, id: ACHIEVEMENTS.eliteScore200 },
+    { threshold: 400, id: ACHIEVEMENTS.eliteScore400 },
+    { threshold: 600, id: ACHIEVEMENTS.eliteScore600 },
+    { threshold: 800, id: ACHIEVEMENTS.eliteScore800 },
+    { threshold: 1000, id: ACHIEVEMENTS.eliteScore1000 },
+    { threshold: 1500, id: ACHIEVEMENTS.eliteScore1500 },
+  ],
+};
 
 // Fast-bonus payout tiers, awarded when awardFastBonus banks the pool.
 const BONUS_POOL_TIERS: ReadonlyArray<{ threshold: number; id: AchievementId }> = [
@@ -2440,8 +2456,9 @@ export class Game {
   }
 
   private checkScoreMilestones(): void {
-    while (this.nextMilestoneIdx < SCORE_MILESTONES.length) {
-      const m = SCORE_MILESTONES[this.nextMilestoneIdx]!;
+    const milestones = SCORE_MILESTONES_BY_DIFFICULTY[this.difficulty];
+    while (this.nextMilestoneIdx < milestones.length) {
+      const m = milestones[this.nextMilestoneIdx]!;
       if (this.score < m.threshold) break;
       void reportAchievement(m.id);
       this.nextMilestoneIdx += 1;
