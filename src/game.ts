@@ -3,13 +3,17 @@ import { trackPlayEnd, trackPlayStart } from "./analytics";
 import { COIN_SHAPE, FallingCluster, hintPalette, kindLabel, pickShape } from "./cluster";
 import { DebrisHex } from "./debris";
 import {
+  ACHIEVEMENT_LIST,
   ACHIEVEMENTS,
   type AchievementId,
   type AchievementMeta,
   getEarnedAchievements,
   initGameCenter,
+  isGameCenterAvailable,
   reportAchievement,
   setAchievementListener,
+  showAchievements as gcShowAchievements,
+  showLeaderboard as gcShowLeaderboard,
   submitScore as gcSubmitScore,
 } from "./gameCenter";
 import {
@@ -114,6 +118,29 @@ const DIFFICULTY_STORAGE_KEY = "hexrain.difficulty";
 const DIFFICULTY_DEFAULT: Difficulty = "medium";
 const HIGH_SCORE_KEY_PREFIX = "hexrain.highScore.";
 const LEGACY_HIGH_SCORE_KEY = "hexrain.highScore";
+// Per-kind first-appearance hint labels (AVOID/HEAL/etc.) and the
+// rotate tutorial fire once per player, not once per session.
+const SEEN_HINTS_STORAGE_KEY = "hexrain.seenHints";
+const ROTATE_TUTORIAL_STORAGE_KEY = "hexrain.rotateTutorialShown";
+
+function loadSeenHints(): Set<ClusterKind> {
+  try {
+    const raw = localStorage.getItem(SEEN_HINTS_STORAGE_KEY);
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? new Set(parsed as ClusterKind[]) : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+function saveSeenHints(set: Set<ClusterKind>): void {
+  try {
+    localStorage.setItem(SEEN_HINTS_STORAGE_KEY, JSON.stringify([...set]));
+  } catch {
+    /* quota / private mode */
+  }
+}
 
 const BASE_FALL_SPEED = 1.6; // initial downward velocity for spawned clusters (px/ms)
 const SPEED_RAMP = 0.04; // px/ms per score
@@ -302,7 +329,7 @@ export class Game {
   // cluster of a never-seen kind gets a big glowing label that follows
   // it down. In-memory only — restarts (after game-over) don't show the
   // labels again, but a full page reload starts fresh.
-  private seenKinds: Set<ClusterKind> = new Set();
+  private seenKinds: Set<ClusterKind> = loadSeenHints();
 
   // Wave/calm cycle. During waves spawns are faster + more varied; during
   // calm there's a breather. One column is kept clear of new spawns while
@@ -368,7 +395,7 @@ export class Game {
   // player grows from 1 → 2 hexes. Slows the game to 0.25x and shows a
   // big "ROTATE" label + curved double-headed arrow around the player
   // until they rotate enough or the timer expires.
-  private rotateTutorialShown = false;
+  private rotateTutorialShown = localStorage.getItem(ROTATE_TUTORIAL_STORAGE_KEY) === "1";
   private rotateTutorialActive = false;
   private rotateTutorialTimer = 0;
   private rotateTutorialStartAngle = 0;
@@ -565,10 +592,22 @@ export class Game {
         if (value) this.setDifficulty(value);
         return;
       }
+      // Reset-hints button on the menu overlay.
+      const resetBtn = target?.closest('button[data-action="reset-hints"]') as HTMLButtonElement | null;
+      if (resetBtn) {
+        this.resetHints(resetBtn);
+        return;
+      }
       // Quit-to-menu button on the paused overlay.
       const quitBtn = target?.closest('button[data-action="quit"]') as HTMLButtonElement | null;
       if (quitBtn) {
         this.quitToMenu();
+        return;
+      }
+      // Achievement badges (iOS) open the GameKit achievements view
+      // rather than starting the game.
+      if (target?.closest(".achievement-badge")) {
+        if (isGameCenterAvailable()) void gcShowAchievements();
         return;
       }
 
@@ -598,6 +637,24 @@ export class Game {
     void initGameCenter().then(() => {
       this.renderAchievementBadges();
     });
+
+    // On iOS, tapping the BEST score opens the GameKit leaderboard, and
+    // tapping an achievement badge opens the GameKit achievements view.
+    // Clicks are no-ops on web/desktop where GameKit isn't available.
+    if (isGameCenterAvailable()) {
+      // .hud has `pointer-events: none` to let canvas drags through, so
+      // re-enable it on the BEST score itself; otherwise the tap falls
+      // through to the menu overlay and starts a game.
+      this.bestEl.style.pointerEvents = "auto";
+      this.bestEl.style.cursor = "pointer";
+      this.bestEl.addEventListener("click", (e) => {
+        e.stopPropagation();
+        // During a run the GameKit sheet would obscure the play area —
+        // pause first so progress isn't lost while the leaderboard is up.
+        if (this.state === "playing") this.pauseGame();
+        void gcShowLeaderboard(this.difficulty);
+      });
+    }
   }
 
   // Queue of metas waiting to be shown; we display one at a time.
@@ -647,6 +704,8 @@ export class Game {
     const host = document.getElementById("achievementBadges");
     if (!host) return;
     const earned = getEarnedAchievements();
+    const countEl = document.getElementById("achievementCount");
+    if (countEl) countEl.textContent = `${earned.length}/${ACHIEVEMENT_LIST.length}`;
     if (earned.length === 0) {
       host.innerHTML = "";
       host.style.width = "";
@@ -814,6 +873,25 @@ export class Game {
     this.setPauseButtonVisible(false);
   }
 
+  // Wipe the persisted seen-hints + rotate-tutorial state so the next
+  // run replays the AVOID/HEAL/SLOW/etc. labels and the rotate gesture
+  // tutorial, then briefly flash the button so the player has feedback.
+  private resetHints(btn: HTMLButtonElement): void {
+    this.seenKinds = new Set();
+    this.rotateTutorialShown = false;
+    try {
+      localStorage.removeItem(SEEN_HINTS_STORAGE_KEY);
+      localStorage.removeItem(ROTATE_TUTORIAL_STORAGE_KEY);
+    } catch { /* ignore */ }
+    const original = btn.textContent ?? "Reset hints";
+    btn.textContent = "Reset!";
+    btn.disabled = true;
+    setTimeout(() => {
+      btn.textContent = original;
+      btn.disabled = false;
+    }, 900);
+  }
+
   private quitToMenu(): void {
     if (this.state !== "paused") return;
     this.resetRunState(0);
@@ -895,7 +973,7 @@ export class Game {
       <p class="hint desktop-only"><kbd>SPACE</kbd> to play again</p>
       <p class="hint touch-only">Tap to play again</p>
       <section class="achievements">
-        <h2>Achievements</h2>
+        <h2>Achievements <span id="achievementCount" class="achievement-count" aria-live="polite"></span></h2>
         <div id="achievementBadges" class="achievement-badges" aria-label="Earned achievements"></div>
       </section>
     `;
@@ -1234,6 +1312,7 @@ export class Game {
   private awardFastBonus(): void {
     if (this.fastBonus <= 0) return;
     const banked = this.fastBonus;
+    const mul = this.fastMultiplier();
     this.score += this.fastBonus;
     this.scoreEl.textContent = String(this.score);
     this.checkScoreMilestones();
@@ -1246,6 +1325,12 @@ export class Game {
         break;
       }
     }
+    // Multiplier achievements based on the peak the player held when the
+    // bonus actually banked. Same single-tier rule as the pool tiers.
+    if (mul >= 6) void reportAchievement(ACHIEVEMENTS.bonus6x);
+    else if (mul >= 5) void reportAchievement(ACHIEVEMENTS.bonus5x);
+    else if (mul >= 4) void reportAchievement(ACHIEVEMENTS.bonus4x);
+    else if (mul >= 3) void reportAchievement(ACHIEVEMENTS.bonus3x);
     // Trifecta: bank the payout while a shield is up and a drone is out.
     if (this.shieldTimer > 0 && this.drones.length > 0) {
       void reportAchievement(ACHIEVEMENTS.trifecta);
@@ -2095,9 +2180,11 @@ export class Game {
     const sizeBefore = this.player.size();
     this.player.addCell(s.targetCell);
 
-    // First 1→2 growth this page session teaches the rotate gesture.
+    // First-ever 1→2 growth (persisted across launches) teaches the
+    // rotate gesture.
     if (sizeBefore === 1 && this.player.size() > 1 && !this.rotateTutorialShown) {
       this.rotateTutorialShown = true;
+      try { localStorage.setItem(ROTATE_TUTORIAL_STORAGE_KEY, "1"); } catch { /* ignore */ }
       this.rotateTutorialActive = true;
       this.rotateTutorialTimer = 0;
       this.rotateTutorialStartAngle = this.player.body.angle;
@@ -2270,10 +2357,9 @@ export class Game {
       this.timeEffectTimer = FAST_EFFECT_DURATION;
       this.timeEffectMax = FAST_EFFECT_DURATION;
       const mul = this.fastMultiplier();
-      if (mul >= 6) void reportAchievement(ACHIEVEMENTS.bonus6x);
-      else if (mul >= 5) void reportAchievement(ACHIEVEMENTS.bonus5x);
-      else if (mul >= 4) void reportAchievement(ACHIEVEMENTS.bonus4x);
-      else if (mul >= 3) void reportAchievement(ACHIEVEMENTS.bonus3x);
+      // Multiplier achievements fire only on payout (in awardFastBonus),
+      // not on pickup — picking up 6X but losing it on a blue hit
+      // shouldn't unlock "Hex Time".
       this.spawnFloater(
         `${mul}X`,
         center.x,
@@ -2340,6 +2426,7 @@ export class Game {
     if (!this.seenKinds.has(kind)) {
       cluster.hintLabel = kindLabel(kind);
       this.seenKinds.add(kind);
+      saveSeenHints(this.seenKinds);
     }
 
     this.clusters.push(cluster);
@@ -2488,6 +2575,7 @@ export class Game {
     if (!this.seenKinds.has(kind)) {
       cluster.hintLabel = kindLabel(kind);
       this.seenKinds.add(kind);
+      saveSeenHints(this.seenKinds);
     }
 
     this.clusters.push(cluster);
@@ -2688,7 +2776,7 @@ export class Game {
       this.bestEl.textContent = String(this.best);
     }
     if (!this.debugRun) trackPlayEnd(this.difficulty, this.score);
-    void gcSubmitScore(this.score);
+    void gcSubmitScore(this.score, this.difficulty);
     // Scatter the player blob into debris so the wreckage tumbles behind the
     // game-over screen. The player body itself is removed from the world so
     // it doesn't keep being clamped to the rail.

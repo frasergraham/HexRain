@@ -9,6 +9,9 @@ body {
   margin: 0;
   padding: 0;
   height: 100%;
+  /* Lock the page so iOS's WKWebView (and mobile browsers) can't pan or
+     rubber-band the menu/HUD around the canvas. */
+  overflow: hidden;
   background: #0d0f1c;
   color: #e8ecff;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -466,9 +469,10 @@ body {
   width: min(340px, 100%);
 }
 
-/* Hide the box entirely until at least one badge is earned. */
-.achievements:has(.achievement-badges:empty) {
-  display: none;
+/* Collapse the empty area when no badges are earned yet, but keep the
+   "Achievements 0/22" header so the player can see the total to chase. */
+.achievements:has(.achievement-badges:empty) h2 {
+  margin-bottom: 0;
 }
 
 .achievements h2 {
@@ -479,6 +483,48 @@ body {
   text-transform: uppercase;
   text-align: center;
   font-weight: 700;
+  display: inline-flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+}
+
+.achievement-count {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: none;
+  color: #aab4dc;
+  font-weight: 700;
+}
+
+/* Small unobtrusive link-style button to clear the seen-hints memory
+   so the player can replay the AVOID/HEAL/SLOW/etc. teach moments. */
+.reset-hints {
+  margin-top: 14px;
+  padding: 6px 12px;
+  font: inherit;
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: #6f7aa6;
+  background: transparent;
+  border: 1px solid #2a3057;
+  border-radius: 8px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: color 120ms, border-color 120ms;
+}
+
+.reset-hints:hover,
+.reset-hints:active {
+  color: #aab4dc;
+  border-color: #3a4280;
+}
+
+.reset-hints:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
 
 /* Polyhex blob: the container is sized inline by JS to the bounding box
@@ -509,6 +555,12 @@ body {
   border: 0;
   border-radius: 0;
   box-shadow: none;
+  cursor: pointer;
+  transition: filter 80ms;
+}
+
+.achievement-badge:active {
+  filter: brightness(0.85);
 }
 
 /* --- Achievement-unlocked banner (web only; iOS uses GameKit's own) --- */

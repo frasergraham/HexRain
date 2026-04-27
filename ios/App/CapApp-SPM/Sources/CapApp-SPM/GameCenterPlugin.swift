@@ -13,6 +13,7 @@ public class GameCenterPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "reportAchievement", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "loadAchievements", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "showLeaderboard", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "showAchievements", returnType: CAPPluginReturnPromise),
     ]
 
     private var didTryAuth = false
@@ -130,6 +131,25 @@ public class GameCenterPlugin: CAPPlugin, CAPBridgedPlugin {
                 .filter { $0.percentComplete >= 100.0 }
                 .compactMap { $0.identifier }
             call.resolve(["ids": ids])
+        }
+    }
+
+    @objc func showAchievements(_ call: CAPPluginCall) {
+        guard GKLocalPlayer.local.isAuthenticated else {
+            call.reject("Game Center not authenticated")
+            return
+        }
+        DispatchQueue.main.async {
+            let vc: GKGameCenterViewController
+            if #available(iOS 14.0, *) {
+                vc = GKGameCenterViewController(state: .achievements)
+            } else {
+                vc = GKGameCenterViewController()
+                vc.viewState = .achievements
+            }
+            vc.gameCenterDelegate = GameCenterDelegateProxy.shared
+            self.bridge?.viewController?.present(vc, animated: true, completion: nil)
+            call.resolve()
         }
     }
 

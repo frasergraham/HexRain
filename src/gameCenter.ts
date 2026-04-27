@@ -1,6 +1,18 @@
 import { Capacitor, registerPlugin } from "@capacitor/core";
 
-export const LEADERBOARD_HIGH_SCORE = "hex_rain.high_score";
+export type LeaderboardDifficulty = "easy" | "medium" | "hard";
+
+export const LEADERBOARDS: Record<LeaderboardDifficulty, string> = {
+  easy: "hex_rain.high_score.easy",
+  medium: "hex_rain.high_score.medium",
+  hard: "hex_rain.high_score.hard",
+};
+
+export const LEADERBOARD_TITLES: Record<LeaderboardDifficulty, string> = {
+  easy: "High Score · Easy",
+  medium: "High Score · Medium",
+  hard: "High Score · Hard",
+};
 
 export const ACHIEVEMENTS = {
   score200: "hex_rain.score_200",
@@ -79,6 +91,7 @@ interface GameCenterPlugin {
   }): Promise<void>;
   loadAchievements(): Promise<{ ids: string[] }>;
   showLeaderboard(opts: { leaderboardId?: string }): Promise<void>;
+  showAchievements(): Promise<void>;
 }
 
 const Plugin = registerPlugin<GameCenterPlugin>("GameCenter");
@@ -151,9 +164,11 @@ export async function initGameCenter(): Promise<void> {
   if (authenticated) await syncAchievementsFromGameCenter();
 }
 
-/// Pull every fully-completed achievement from Game Center into the local
-/// earned-set. Returns the count of newly-added IDs so the caller can
-/// decide whether to re-render the menu badge polyhex.
+/// On iOS, Game Center is canonical: replace the local earned-set with
+/// whatever Game Center reports (filtered to IDs we know about). This
+/// way a stale local entry (e.g. from a removed/renamed achievement, or
+/// pre-Game-Center installs) doesn't haunt the menu polyhex. Returns the
+/// number of changes so the caller can decide to re-render.
 export async function syncAchievementsFromGameCenter(): Promise<number> {
   if (!isIOS() || !authenticated) return 0;
   let result: { ids: string[] };
@@ -164,22 +179,30 @@ export async function syncAchievementsFromGameCenter(): Promise<number> {
     return 0;
   }
   if (!result || !Array.isArray(result.ids)) return 0;
-  let added = 0;
+  const next = new Set<AchievementId>();
   for (const raw of result.ids) {
     const id = raw as AchievementId;
-    if (META_BY_ID.has(id) && !earned.has(id)) {
-      earned.add(id);
-      added += 1;
-    }
+    if (META_BY_ID.has(id)) next.add(id);
   }
-  if (added > 0) saveEarned(earned);
-  return added;
+  let changed = next.size !== earned.size;
+  if (!changed) {
+    for (const id of next) if (!earned.has(id)) { changed = true; break; }
+  }
+  if (changed) {
+    earned.clear();
+    for (const id of next) earned.add(id);
+    saveEarned(earned);
+  }
+  return changed ? next.size : 0;
 }
 
-export async function submitScore(score: number): Promise<void> {
+export async function submitScore(
+  score: number,
+  difficulty: LeaderboardDifficulty,
+): Promise<void> {
   if (!authenticated) return;
   try {
-    await Plugin.submitScore({ score, leaderboardId: LEADERBOARD_HIGH_SCORE });
+    await Plugin.submitScore({ score, leaderboardId: LEADERBOARDS[difficulty] });
   } catch (err) {
     console.warn("[GameCenter] submitScore failed:", err);
   }
@@ -215,11 +238,30 @@ export async function reportAchievement(
   }
 }
 
-export async function showLeaderboard(): Promise<void> {
+export async function showLeaderboard(
+  difficulty: LeaderboardDifficulty,
+): Promise<void> {
   if (!authenticated) return;
   try {
-    await Plugin.showLeaderboard({ leaderboardId: LEADERBOARD_HIGH_SCORE });
+    await Plugin.showLeaderboard({ leaderboardId: LEADERBOARDS[difficulty] });
   } catch (err) {
     console.warn("[GameCenter] showLeaderboard failed:", err);
   }
+}
+
+export async function showAchievements(): Promise<void> {
+  if (!authenticated) return;
+  try {
+    await Plugin.showAchievements();
+  } catch (err) {
+    console.warn("[GameCenter] showAchievements failed:", err);
+  }
+}
+
+export function isGameCenterAuthenticated(): boolean {
+  return authenticated;
+}
+
+export function isGameCenterAvailable(): boolean {
+  return isIOS();
 }

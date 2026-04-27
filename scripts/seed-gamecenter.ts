@@ -1,6 +1,6 @@
 // Idempotent App Store Connect seeder for Hex Rain's Game Center setup.
 //
-// Reads ACHIEVEMENT_LIST + LEADERBOARD_HIGH_SCORE from src/gameCenter.ts so
+// Reads ACHIEVEMENT_LIST + LEADERBOARDS from src/gameCenter.ts so
 // the JS layer is the single source of truth.
 //
 // What it does:
@@ -23,7 +23,12 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SignJWT, importPKCS8 } from "jose";
 
-import { ACHIEVEMENT_LIST, LEADERBOARD_HIGH_SCORE } from "../src/gameCenter";
+import {
+  ACHIEVEMENT_LIST,
+  LEADERBOARD_TITLES,
+  LEADERBOARDS,
+  type LeaderboardDifficulty,
+} from "../src/gameCenter";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -150,23 +155,27 @@ async function ensureGameCenterDetail(): Promise<string> {
 
 // --- Leaderboard ---------------------------------------------------------
 
-async function ensureLeaderboard(gcDetailId: string): Promise<string> {
+async function ensureLeaderboard(
+  gcDetailId: string,
+  vendorId: string,
+  referenceName: string,
+): Promise<string> {
   // ASC's GET doesn't support filter[vendorIdentifier]; list and match in JS.
   const list = await asc<AscList<AscResource<{ vendorIdentifier?: string }>>>(
     "GET",
     `/v1/gameCenterDetails/${gcDetailId}/gameCenterLeaderboards?limit=200`,
   );
-  const hit = list.data.find((d) => d.attributes?.vendorIdentifier === LEADERBOARD_HIGH_SCORE);
+  const hit = list.data.find((d) => d.attributes?.vendorIdentifier === vendorId);
   if (hit) {
-    console.log(`✓ leaderboard ${LEADERBOARD_HIGH_SCORE} exists (${hit.id})`);
+    console.log(`✓ leaderboard ${vendorId} exists (${hit.id})`);
     return hit.id;
   }
   const created = await asc<AscSingle<AscResource>>("POST", `/v1/gameCenterLeaderboards`, {
     data: {
       type: "gameCenterLeaderboards",
       attributes: {
-        referenceName: "High Score",
-        vendorIdentifier: LEADERBOARD_HIGH_SCORE,
+        referenceName,
+        vendorIdentifier: vendorId,
         defaultFormatter: "INTEGER",
         submissionType: "BEST_SCORE",
         scoreSortType: "DESC",
@@ -178,11 +187,14 @@ async function ensureLeaderboard(gcDetailId: string): Promise<string> {
       },
     },
   });
-  console.log(`+ leaderboard ${LEADERBOARD_HIGH_SCORE} created (${created.data.id})`);
+  console.log(`+ leaderboard ${vendorId} created (${created.data.id})`);
   return created.data.id;
 }
 
-async function ensureLeaderboardLocalization(lbId: string): Promise<string> {
+async function ensureLeaderboardLocalization(
+  lbId: string,
+  name: string,
+): Promise<string> {
   const list = await asc<AscList<AscResource<{ locale?: string }>>>(
     "GET",
     `/v1/gameCenterLeaderboards/${lbId}/localizations?limit=200`,
@@ -197,7 +209,7 @@ async function ensureLeaderboardLocalization(lbId: string): Promise<string> {
       type: "gameCenterLeaderboardLocalizations",
       attributes: {
         locale: "en-US",
-        name: "High Score",
+        name,
         formatterOverride: "INTEGER",
         formatterSuffix: "points",
         formatterSuffixSingular: "point",
@@ -362,15 +374,19 @@ async function uploadImage(
 async function main() {
   const gcDetailId = await ensureGameCenterDetail();
 
-  const lbId = await ensureLeaderboard(gcDetailId);
-  const lbLocId = await ensureLeaderboardLocalization(lbId);
-  await uploadImage(
-    "gameCenterLeaderboardImages",
-    "gameCenterLeaderboardLocalization",
-    "gameCenterLeaderboardLocalizations",
-    lbLocId,
-    resolve(__dirname, "..", "assets", "achievement-icons", "leaderboard-high-score.png"),
-  );
+  for (const difficulty of Object.keys(LEADERBOARDS) as LeaderboardDifficulty[]) {
+    const vendorId = LEADERBOARDS[difficulty];
+    const title = LEADERBOARD_TITLES[difficulty];
+    const lbId = await ensureLeaderboard(gcDetailId, vendorId, title);
+    const lbLocId = await ensureLeaderboardLocalization(lbId, title);
+    await uploadImage(
+      "gameCenterLeaderboardImages",
+      "gameCenterLeaderboardLocalization",
+      "gameCenterLeaderboardLocalizations",
+      lbLocId,
+      resolve(__dirname, "..", "assets", "achievement-icons", `leaderboard-${difficulty}.png`),
+    );
+  }
 
   for (const meta of ACHIEVEMENT_LIST) {
     const achId = await ensureAchievement(gcDetailId, meta.id, meta.name);

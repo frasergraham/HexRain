@@ -105,10 +105,17 @@ for (const meta of ACHIEVEMENT_LIST) {
   console.log(`wrote ${file}`);
 }
 
-// Leaderboard icon — gold star on a soft amber hex, distinct from the
-// achievement palette so it reads as "high score" rather than a tier.
-renderToFile(
-  svgFor("★", "#ffd76b"),
-  resolve(outDir, "leaderboard-high-score.png"),
-);
-console.log(`wrote leaderboard-high-score.png`);
+// Per-difficulty leaderboard icons — same star glyph, different tints so
+// they're distinguishable in the GameKit leaderboard list. Tints
+// roughly match the in-game difficulty palette: blue (easy) → amber
+// (medium) → orange (hard).
+const LEADERBOARD_TINTS: Record<string, string> = {
+  easy: "#5b8bff",
+  medium: "#ffd76b",
+  hard: "#ff7a4a",
+};
+for (const [diff, tint] of Object.entries(LEADERBOARD_TINTS)) {
+  const file = resolve(outDir, `leaderboard-${diff}.png`);
+  renderToFile(svgFor("★", tint), file);
+  console.log(`wrote ${file}`);
+}
