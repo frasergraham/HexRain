@@ -1170,19 +1170,20 @@ export class Game {
       const cxMax = this.boardOriginX + this.boardWidth - halfTextW - margin;
       const cx = cxMin <= cxMax ? Math.max(cxMin, Math.min(cxMax, cxIdeal)) : cxIdeal;
 
-      const yIdeal = c.body.bounds.min.y - this.hexSize * 1.0;
-      const yMin = this.boardOriginY + fontSize * 0.9;
-      const yMax = this.boardOriginY + this.boardHeight - margin;
-      const y = Math.max(yMin, Math.min(yMax, yIdeal));
+      // Pin the label just below the slow/fast countdown bar (which
+      // sits at topInset + 6, height 6) so it's never partially
+      // obscured by the iOS Dynamic Island. textBaseline is alphabetic,
+      // so y is the baseline; offset by ~cap-height of the font.
+      const y = this.boardOriginY + this.topInset + 18 + fontSize * 0.74;
 
-      // Fade in as the label clears the HUD/Dynamic Island band: fully
-      // hidden while the label's top is inside the inset, fully visible
-      // once it has descended one font-size past it.
-      const labelTop = y - fontSize;
-      const fadeStart = this.boardOriginY + this.topInset;
-      const fadeEnd = fadeStart + fontSize;
+      // Fade in based on the cluster's descent through the obscured
+      // band: fully invisible while the cluster top is still above the
+      // canvas, fully visible by the time it has cleared the inset.
+      const clusterTop = c.body.bounds.min.y;
+      const fadeStart = this.boardOriginY;
+      const fadeEnd = this.boardOriginY + this.topInset + fontSize * 1.2;
       const alpha = fadeEnd > fadeStart
-        ? Math.max(0, Math.min(1, (labelTop - fadeStart) / (fadeEnd - fadeStart)))
+        ? Math.max(0, Math.min(1, (clusterTop - fadeStart) / (fadeEnd - fadeStart)))
         : 1;
       if (alpha <= 0) continue;
       ctx.globalAlpha = alpha;
@@ -1198,7 +1199,12 @@ export class Game {
       ctx.globalAlpha = 1;
     }
 
-    if (drewAny) ctx.restore();
+    if (drewAny) {
+      // letterSpacing isn't preserved by save/restore; reset before
+      // restoring so subsequent text draws keep default kerning.
+      (ctx as CanvasRenderingContext2D & { letterSpacing?: string }).letterSpacing = "0px";
+      ctx.restore();
+    }
   }
 
   private fastMultiplier(): number {
@@ -1346,6 +1352,7 @@ export class Game {
     ctx.save();
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
+    (ctx as CanvasRenderingContext2D & { letterSpacing?: string }).letterSpacing = "0.22em";
     for (const f of this.floaters) {
       const t = f.age / f.lifetime;
       // Drift via per-floater velocity (defaults to a 1s upward rise) plus
@@ -1371,7 +1378,9 @@ export class Game {
         scale = 1 + (f.peakScale - 1) * Math.min(1, f.age / 0.18);
         alpha = Math.max(0, 1 - t);
       }
-      ctx.font = `900 ${f.fontSize}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
+      // Match the cluster kind-hint font so the +N / -N pops read as
+      // part of the same UI vocabulary as AVOID / HEAL / SLOW / FAST.
+      ctx.font = `600 ${f.fontSize}px "Avenir Next", "Helvetica Neue", "Trebuchet MS", Arial, sans-serif`;
       ctx.globalAlpha = alpha;
       ctx.shadowColor = f.glowColor;
       ctx.shadowBlur = 20;
@@ -1395,6 +1404,9 @@ export class Game {
       ctx.strokeText(f.text, 0, 0);
       ctx.restore();
     }
+    // letterSpacing isn't preserved by save/restore; reset it before
+    // returning so subsequent text draws keep their default kerning.
+    (ctx as CanvasRenderingContext2D & { letterSpacing?: string }).letterSpacing = "0px";
     ctx.restore();
   }
 
