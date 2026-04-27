@@ -77,6 +77,7 @@ interface GameCenterPlugin {
     id: string;
     percentComplete: number;
   }): Promise<void>;
+  loadAchievements(): Promise<{ ids: string[] }>;
   showLeaderboard(opts: { leaderboardId?: string }): Promise<void>;
 }
 
@@ -144,6 +145,35 @@ export async function initGameCenter(): Promise<void> {
     console.warn("[GameCenter] authenticate failed:", err);
     authenticated = false;
   }
+  // Once authenticated, pull anything Game Center has on file (earned on
+  // another device, or carried over from a reinstall) and merge into the
+  // local set so the menu polyhex reflects the player's full history.
+  if (authenticated) await syncAchievementsFromGameCenter();
+}
+
+/// Pull every fully-completed achievement from Game Center into the local
+/// earned-set. Returns the count of newly-added IDs so the caller can
+/// decide whether to re-render the menu badge polyhex.
+export async function syncAchievementsFromGameCenter(): Promise<number> {
+  if (!isIOS() || !authenticated) return 0;
+  let result: { ids: string[] };
+  try {
+    result = await Plugin.loadAchievements();
+  } catch (err) {
+    console.warn("[GameCenter] loadAchievements failed:", err);
+    return 0;
+  }
+  if (!result || !Array.isArray(result.ids)) return 0;
+  let added = 0;
+  for (const raw of result.ids) {
+    const id = raw as AchievementId;
+    if (META_BY_ID.has(id) && !earned.has(id)) {
+      earned.add(id);
+      added += 1;
+    }
+  }
+  if (added > 0) saveEarned(earned);
+  return added;
 }
 
 export async function submitScore(score: number): Promise<void> {

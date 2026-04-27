@@ -109,6 +109,27 @@ public class GameCenterPlugin: CAPPlugin {
         }
     }
 
+    /// Returns the IDs of every achievement the player has fully completed in
+    /// Game Center. Used by the JS layer to seed the local earned-set on
+    /// launch so cross-device unlocks (or reinstalls) show up in the menu's
+    /// achievement polyhex without the player having to re-earn them.
+    @objc func loadAchievements(_ call: CAPPluginCall) {
+        guard GKLocalPlayer.local.isAuthenticated else {
+            call.reject("Game Center not authenticated")
+            return
+        }
+        GKAchievement.loadAchievements { achievements, error in
+            if let error = error {
+                call.reject("loadAchievements failed: \(error.localizedDescription)")
+                return
+            }
+            let ids = (achievements ?? [])
+                .filter { $0.percentComplete >= 100.0 }
+                .compactMap { $0.identifier }
+            call.resolve(["ids": ids])
+        }
+    }
+
     @objc func showLeaderboard(_ call: CAPPluginCall) {
         guard GKLocalPlayer.local.isAuthenticated else {
             call.reject("Game Center not authenticated")

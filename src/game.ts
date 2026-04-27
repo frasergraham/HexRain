@@ -537,7 +537,13 @@ export class Game {
     setAchievementListener((meta) => this.queueAchievementBanner(meta));
 
     // Fire-and-forget Game Center auth on iOS; no-op elsewhere.
-    void initGameCenter();
+    // Game Center auth (no-op off iOS) also seeds the local earned-set
+    // from any completed achievements the player has on Game Center, so
+    // a reinstall / second device picks up the existing polyhex on the
+    // menu without the player having to re-earn.
+    void initGameCenter().then(() => {
+      this.renderAchievementBadges();
+    });
   }
 
   // Queue of metas waiting to be shown; we display one at a time.
