@@ -1016,10 +1016,10 @@ export class Game {
       if (!c.hintLabel || !c.alive) continue;
       if (!drewAny) {
         ctx.save();
-        ctx.font = `700 ${fontSize}px ui-monospace, "SF Mono", Menlo, Consolas, monospace`;
+        ctx.font = `600 ${fontSize}px "Avenir Next", "Helvetica Neue", "Trebuchet MS", Arial, sans-serif`;
         // letterSpacing is well-supported in modern Chromium/Safari;
         // older engines ignore it and the label just renders tight.
-        (ctx as CanvasRenderingContext2D & { letterSpacing?: string }).letterSpacing = "0.16em";
+        (ctx as CanvasRenderingContext2D & { letterSpacing?: string }).letterSpacing = "0.22em";
         ctx.textAlign = "center";
         ctx.textBaseline = "alphabetic";
         drewAny = true;
@@ -1608,8 +1608,8 @@ export class Game {
     // kind-hint labels — 700-weight, wide letter-spacing — and ~20%
     // smaller than the prior 900-weight system sans-serif.
     const fontSize = Math.max(28, Math.round(this.hexSize * 1.92));
-    ctx.font = `700 ${fontSize}px ui-monospace, "SF Mono", Menlo, Consolas, monospace`;
-    (ctx as CanvasRenderingContext2D & { letterSpacing?: string }).letterSpacing = "0.16em";
+    ctx.font = `600 ${fontSize}px "Avenir Next", "Helvetica Neue", "Trebuchet MS", Arial, sans-serif`;
+    (ctx as CanvasRenderingContext2D & { letterSpacing?: string }).letterSpacing = "0.22em";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     const labelY = Math.max(
