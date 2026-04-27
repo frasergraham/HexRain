@@ -1057,6 +1057,10 @@ export class Game {
         break;
       }
     }
+    // Trifecta: bank the payout while a shield is up and a drone is out.
+    if (this.shieldTimer > 0 && this.drones.length > 0) {
+      void reportAchievement(ACHIEVEMENTS.trifecta);
+    }
     const p = this.fastBonusHudPos();
     // Big celebratory pop: huge font, scale 0 → 1.6 fast, then a slow
     // upward drift + fade so the player can really see the payout.

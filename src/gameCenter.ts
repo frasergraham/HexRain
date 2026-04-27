@@ -17,6 +17,7 @@ export const ACHIEVEMENTS = {
   bonusPool50: "hex_rain.bonus_pool_50",
   bonusPool75: "hex_rain.bonus_pool_75",
   bonusPool100: "hex_rain.bonus_pool_100",
+  trifecta: "hex_rain.trifecta",
   survivor: "hex_rain.survivor",
 } as const;
 
@@ -45,6 +46,7 @@ export const ACHIEVEMENT_LIST: ReadonlyArray<AchievementMeta> = [
   { id: ACHIEVEMENTS.bonusPool50, name: "Half a Hundred", description: "Bank a +50 fast-bonus payout", badge: "+50", tint: "#ffc94a" },
   { id: ACHIEVEMENTS.bonusPool75, name: "Three Quarters", description: "Bank a +75 fast-bonus payout", badge: "+75", tint: "#ffba2e" },
   { id: ACHIEVEMENTS.bonusPool100, name: "Full Stack", description: "Bank a +100 fast-bonus payout", badge: "+100", tint: "#ffa311" },
+  { id: ACHIEVEMENTS.trifecta, name: "Trifecta", description: "Bank a fast-bonus payout with a shield and a drone active", badge: "★", tint: "#dff2ff" },
   { id: ACHIEVEMENTS.survivor, name: "Survivor", description: "Reach the danger zone and recover to 1 hex", badge: "♥", tint: "#ff5c6e" },
 ];
 
