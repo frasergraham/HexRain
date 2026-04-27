@@ -431,8 +431,18 @@ export function bindSlider(
   let active = false;
   const KNOB_HALF = 24;
   const PAD_INSET = 8;
+  // Forgiving hit zone around the knob so a finger that lands a few px
+  // off still grabs it, but a tap further out is ignored entirely.
+  const HIT_TOLERANCE = 18;
 
-  const computeValue = (clientX: number): number => {
+  // The slider is now relative-drag: tapping outside the knob does
+  // nothing, and dragging tracks the knob with a fixed grab offset so
+  // the knob doesn't jump under the finger on grab. We track the
+  // knob's current value here so we know where it is on each new tap.
+  let currentValue = 0;
+  let dragOffsetPx = 0;
+
+  const valueFromClientX = (clientX: number): number => {
     const rect = pad.getBoundingClientRect();
     const usable = rect.width - 2 * (PAD_INSET + KNOB_HALF);
     if (usable <= 0) return 0;
@@ -441,24 +451,36 @@ export function bindSlider(
     return ratio * 2 - 1;
   };
 
+  const knobCenterClientX = (value: number): number => {
+    const rect = pad.getBoundingClientRect();
+    const usable = rect.width - 2 * (PAD_INSET + KNOB_HALF);
+    const ratio = (value + 1) / 2;
+    return rect.left + PAD_INSET + KNOB_HALF + ratio * usable;
+  };
+
   const positionKnob = (value: number): void => {
     const rect = pad.getBoundingClientRect();
     const usable = rect.width - 2 * (PAD_INSET + KNOB_HALF);
     const ratio = (value + 1) / 2;
     const x = PAD_INSET + KNOB_HALF + ratio * usable - KNOB_HALF;
     knob.style.left = `${x}px`;
+    currentValue = value;
   };
 
-  const start = (clientX: number) => {
+  const start = (clientX: number): boolean => {
+    const knobX = knobCenterClientX(currentValue);
+    if (Math.abs(clientX - knobX) > KNOB_HALF + HIT_TOLERANCE) {
+      // Tap landed off the knob — ignore. No callback, no visual move.
+      return false;
+    }
     active = true;
     pad.classList.add("active");
-    const v = computeValue(clientX);
-    positionKnob(v);
-    onSlide(v);
+    dragOffsetPx = clientX - knobX;
+    return true;
   };
   const move = (clientX: number) => {
     if (!active) return;
-    const v = computeValue(clientX);
+    const v = valueFromClientX(clientX - dragOffsetPx);
     positionKnob(v);
     onSlide(v);
   };
@@ -480,17 +502,19 @@ export function bindSlider(
     if (t) start(t.clientX);
   };
   const onTouchMove = (e: TouchEvent) => {
+    if (!active) return;
     e.preventDefault();
     const t = e.targetTouches[0];
     if (t) move(t.clientX);
   };
   const onTouchEnd = (e: TouchEvent) => {
+    if (!active) return;
     e.preventDefault();
     if (e.targetTouches.length === 0) end();
   };
   const onMouseDown = (e: MouseEvent) => {
+    if (!start(e.clientX)) return;
     e.preventDefault();
-    start(e.clientX);
   };
   const onMouseMove = (e: MouseEvent) => {
     if (active) move(e.clientX);
