@@ -412,6 +412,17 @@ export class Game {
     // crossings.
     pushHoldT: number;
     pushDir: 0 | -1 | 1;
+    // Pending transition: when a new wall kind is requested while the
+    // previous is still visible, the new kind is queued and applied
+    // after the current wall has retracted (so kinds always ease out
+    // before the next one eases in).
+    pendingKind: WallKind | null;
+    pendingAmount: number;
+    pendingAmp: number;
+    pendingPeriod: number;
+    // Narrow-wall warning: when a narrow wall is about to slide in,
+    // flash a red line on each side for ~500 ms.
+    narrowWarningT: number;
   } = {
     kind: "none",
     amount: 0,
@@ -421,6 +432,11 @@ export class Game {
     phase: 0,
     pushHoldT: 0,
     pushDir: 0,
+    pendingKind: null,
+    pendingAmount: 0,
+    pendingAmp: 0.18,
+    pendingPeriod: 1.4,
+    narrowWarningT: 0,
   };
 
   // Three-plane starfield. Generated on resize and whenever the score
@@ -1558,15 +1574,29 @@ export class Game {
     const wallLerp = 1 - Math.exp(-dt * 4);
     this.wall.amount += (this.wall.amountTarget - this.wall.amount) * wallLerp;
     if (this.wall.kind === "zigzag") this.wall.phase += dt;
-    // Decay the zigzag push-direction hold so direction can flip again
-    // once the player has cleared the prior wall sweep.
+    if (this.wall.narrowWarningT > 0) {
+      this.wall.narrowWarningT = Math.max(0, this.wall.narrowWarningT - dt);
+    }
     if (this.wall.pushHoldT > 0) {
       this.wall.pushHoldT = Math.max(0, this.wall.pushHoldT - dt);
       if (this.wall.pushHoldT === 0) this.wall.pushDir = 0;
     }
-    // Allow a kind change once the previous wall has fully retracted.
-    if (this.wall.kind !== "none" && this.wall.amountTarget === 0 && this.wall.amount < 0.01) {
-      this.wall.kind = "none";
+    // Once the current wall has retracted, apply any pending kind. If
+    // there's no pending kind, fall back to "none". This is what gives
+    // walls the visible ease-out behavior — they don't snap off.
+    if (this.wall.amount < 0.01 && this.wall.amountTarget === 0) {
+      if (this.wall.pendingKind !== null) {
+        this.wall.kind = this.wall.pendingKind;
+        this.wall.amountTarget = this.wall.pendingAmount;
+        this.wall.amp = this.wall.pendingAmp;
+        this.wall.period = this.wall.pendingPeriod;
+        if (this.wall.kind === "narrow" && this.wall.amountTarget > 0) {
+          this.wall.narrowWarningT = 0.5;
+        }
+        this.wall.pendingKind = null;
+      } else if (this.wall.kind !== "none") {
+        this.wall.kind = "none";
+      }
     }
 
     // ROTATE tutorial: tick its timer and dismiss when the player has
@@ -2753,6 +2783,21 @@ export class Game {
     const allParts = cluster.partWorldPositions();
     // Sticky red is a heal, not a hit — fast bonus survives this contact.
     // Only a real blue-cluster collision ends fast mode.
+    // If the player is already at size 1, there's nothing to heal so the
+    // pickup banks +2 points instead, with a coin-style floater.
+    if (this.player.size() === 1) {
+      const HEAL_BONUS = 2;
+      this.score += HEAL_BONUS;
+      this.scoreEl.textContent = String(this.score);
+      this.checkScoreMilestones();
+      this.spawnFloater(
+        `+${HEAL_BONUS}`,
+        cluster.body.position.x,
+        cluster.body.position.y,
+        "#ff9bb5",
+        "rgba(255, 140, 180, 0.95)",
+      );
+    }
     // A sticky cluster of N hexes rips off N-1 hexes from the player
     // (floor of 1, capped at player size - 1 so we always leave at least
     // one cell). The cells removed are the N-1 closest to the contact
@@ -3269,7 +3314,7 @@ export class Game {
     const sizeRaw = Math.max(1, Math.min(5, slot.size));
     let size = sizeRaw;
     // Narrow walls can't fit size-4+ polyhexes through the corridor; clamp.
-    if (wave.walls === "narrow" && size >= 4) size = 3;
+    if (wave.walls === "narrow" && size >= 3) size = 2;
     const shape = buildPolyhexShape(size, Math.random);
 
     const angle = ANGLE_TABLE[Math.max(0, Math.min(9, slot.angleIdx))] as {
@@ -3350,7 +3395,7 @@ export class Game {
       shape = COIN_SHAPE;
     } else {
       const sz = wave.sizeMin + Math.floor(Math.random() * (wave.sizeMax - wave.sizeMin + 1));
-      const sizeClamped = wave.walls === "narrow" && sz >= 4 ? 3 : sz;
+      const sizeClamped = wave.walls === "narrow" && sz >= 3 ? 2 : sz;
       shape = buildPolyhexShape(Math.max(1, Math.min(5, sizeClamped)), Math.random);
     }
 
@@ -3612,18 +3657,37 @@ export class Game {
   // Single source of truth for how far the active wall reaches in from
   // each side at world y. Pinch and narrow are y-independent; zigzag's
   // inset varies sinusoidally with y to make the corridor slant.
-  // Set wall kind and target amount. Caller is responsible for
-  // not switching kinds while the previous one is still visible — the
-  // update loop guards by holding the kind until amount drops to ~0.
+  // Set wall kind + target. To get smooth ease-out followed by
+  // ease-in, we never snap the kind. If the new kind matches the
+  // current one we just update the target. Otherwise we set the
+  // target to 0 (retract the current kind) and queue the new one;
+  // the update loop applies the pending kind once amount lerps to ~0.
   private setWall(kind: WallKind, amount: number, ampPeriod?: { amp: number; period: number }): void {
-    this.wall.kind = kind;
-    this.wall.amountTarget = amount;
-    if (ampPeriod) {
-      this.wall.amp = ampPeriod.amp;
-      this.wall.period = ampPeriod.period;
+    const amp = ampPeriod?.amp ?? 0.18;
+    const period = ampPeriod?.period ?? 1.4;
+    if (kind === this.wall.kind) {
+      this.wall.amountTarget = amount;
+      this.wall.amp = amp;
+      this.wall.period = period;
+      this.wall.pendingKind = null;
+      if (kind === "narrow" && amount > 0 && this.wall.amount < 0.05) {
+        this.wall.narrowWarningT = 0.5;
+      }
+    } else if (this.wall.amount < 0.01) {
+      // Current wall already retracted — switch kinds immediately.
+      this.wall.kind = kind;
+      this.wall.amountTarget = amount;
+      this.wall.amp = amp;
+      this.wall.period = period;
+      this.wall.pendingKind = null;
+      if (kind === "narrow" && amount > 0) this.wall.narrowWarningT = 0.5;
     } else {
-      this.wall.amp = 0.18;
-      this.wall.period = 1.4;
+      // Queue the new kind; let the current one retract first.
+      this.wall.amountTarget = 0;
+      this.wall.pendingKind = kind;
+      this.wall.pendingAmount = amount;
+      this.wall.pendingAmp = amp;
+      this.wall.pendingPeriod = period;
     }
     if (kind === "none") {
       this.wall.pushHoldT = 0;
@@ -3725,6 +3789,22 @@ export class Game {
   }
 
   private drawWalls(ctx: CanvasRenderingContext2D): void {
+    // Narrow approach warning: red blinking line on each play-area edge
+    // that fires once when narrow walls start sliding in. Renders even
+    // before the wall amount has lerped past the visibility threshold.
+    if (this.wall.narrowWarningT > 0) {
+      const t = this.wall.narrowWarningT;
+      const blink = Math.sin(t * Math.PI * 16) > 0 ? 1 : 0.25;
+      const alpha = Math.min(1, t / 0.1) * blink;
+      ctx.fillStyle = `rgba(255, 80, 90, ${0.85 * alpha})`;
+      ctx.fillRect(this.boardOriginX, this.boardOriginY, 3, this.boardHeight);
+      ctx.fillRect(
+        this.boardOriginX + this.boardWidth - 3,
+        this.boardOriginY,
+        3,
+        this.boardHeight,
+      );
+    }
     if (this.wall.amount < 0.01) return;
     const x0 = this.boardOriginX;
     const y0 = this.boardOriginY;
@@ -3820,10 +3900,10 @@ export class Game {
       return { left: inset, right: inset };
     }
     if (this.wall.kind === "narrow") {
-      // 0.5 leaves ~4-5 columns of corridor (out of 9). 0.85 was too
-      // tight — at hex sizes that fit the screen the player couldn't
-      // move at all and a size-3+ polyhex literally couldn't fit.
-      const inset = this.wall.amount * halfBoard * 0.5;
+      // 0.42 leaves ~5 columns of corridor (out of 9). Tight enough
+      // to feel restrictive vs pinch (0.36) without locking the
+      // player against a wall.
+      const inset = this.wall.amount * halfBoard * 0.42;
       return { left: inset, right: inset };
     }
     if (this.wall.kind === "zigzag") {

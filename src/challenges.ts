@@ -180,17 +180,22 @@ export const CHALLENGES: ChallengeDef[] = [
     waves: [
       "size=2-3, rate=0.9, speed=1.1, count=8",
       "size=1, rate=0.2, speed=1.2, count=15, walls=pinch",
+      // Pre-narrow relief — sticky-heavy so the player can shrink down
+      // before the first narrow gauntlet.
+      "size=2-3, rate=0.85, speed=1.15, count=8, pct=normal:50,sticky:40,coin:10",
       "size=3, rate=0.75, speed=1.2, count=9, walls=narrow",
       "size=1, rate=0.18, speed=1.25, count=18, walls=narrow",
       "count=0, slotRate=0.5, speed=1.25, walls=narrow, 230,330,430,000,330,430,230,330",
-      "size=3, rate=0.7, speed=1.3, count=10, walls=narrow, pct=normal:60,sticky:25,slow:10,coin:5",
+      // Mid-challenge breather: pinch instead of narrow + heavy heal mix.
+      "size=2-3, rate=0.8, speed=1.25, count=10, walls=pinch, pct=normal:55,sticky:30,coin:15",
       "size=1, rate=0.18, speed=1.35, count=20",
-      "size=3, rate=0.65, speed=1.4, count=11, walls=narrow, pct=normal:60,fast:20,slow:10,coin:10",
-      "size=1, rate=0.16, speed=1.45, count=22, walls=narrow",
+      // Second narrow run, with helpers.
+      "size=3, rate=0.65, speed=1.4, count=11, walls=narrow, pct=normal:55,sticky:20,fast:15,slow:10",
       "count=0, slotRate=0.45, speed=1.4, walls=narrow, 130,230,330,000,230,330,130,000,230",
-      "size=3, rate=0.55, speed=1.55, count=13, walls=narrow",
+      // Pre-finale relief — heals + slow before the closer.
+      "size=2-3, rate=0.7, speed=1.4, count=11, pct=normal:50,sticky:35,slow:10,coin:5",
       "size=1, rate=0.15, speed=1.6, count=26",
-      "size=3, rate=0.5, speed=1.6, count=14, walls=narrow, pct=normal:65,fast:15,sticky:10,coin:10",
+      "size=3, rate=0.55, speed=1.6, count=13, walls=narrow, pct=normal:60,sticky:15,fast:15,coin:10",
     ],
   },
   {
