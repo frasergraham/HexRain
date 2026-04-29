@@ -3820,7 +3820,10 @@ export class Game {
       return { left: inset, right: inset };
     }
     if (this.wall.kind === "narrow") {
-      const inset = this.wall.amount * halfBoard * 0.85;
+      // 0.5 leaves ~4-5 columns of corridor (out of 9). 0.85 was too
+      // tight — at hex sizes that fit the screen the player couldn't
+      // move at all and a size-3+ polyhex literally couldn't fit.
+      const inset = this.wall.amount * halfBoard * 0.5;
       return { left: inset, right: inset };
     }
     if (this.wall.kind === "zigzag") {
