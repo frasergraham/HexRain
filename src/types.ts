@@ -11,9 +11,20 @@ export type ClusterKind =
 
 export type Shape = Axial[];
 
-export type GameState = "menu" | "playing" | "paused" | "gameover";
+export type GameState =
+  | "menu"
+  | "challengeSelect"
+  | "challengeIntro"
+  | "playing"
+  | "paused"
+  | "gameover"
+  | "challengeComplete";
+
+export type GameMode = "endless" | "challenge";
 
 export type Difficulty = "easy" | "medium" | "hard";
+
+export type WallKind = "none" | "pinch" | "zigzag" | "narrow";
 
 export type InputAction =
   | "left"

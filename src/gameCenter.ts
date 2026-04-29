@@ -37,6 +37,12 @@ export const ACHIEVEMENTS = {
   bonusPool100: "hex_rain.bonus_pool_100",
   trifecta: "hex_rain.trifecta",
   survivor: "hex_rain.survivor",
+  challengeBlock1: "hex_rain.challenge_block_1",
+  challengeBlock2: "hex_rain.challenge_block_2",
+  challengeBlock3: "hex_rain.challenge_block_3",
+  challengeBlock4: "hex_rain.challenge_block_4",
+  challengeBlock5: "hex_rain.challenge_block_5",
+  challengeBlock6: "hex_rain.challenge_block_6",
 } as const;
 
 export type AchievementId = (typeof ACHIEVEMENTS)[keyof typeof ACHIEVEMENTS];
@@ -72,6 +78,12 @@ export const ACHIEVEMENT_LIST: ReadonlyArray<AchievementMeta> = [
   { id: ACHIEVEMENTS.bonusPool100, name: "Full Stack", description: "Bank a +100 fast-bonus payout", badge: "+100", tint: "#ffa311" },
   { id: ACHIEVEMENTS.trifecta, name: "Trifecta", description: "Bank a fast-bonus payout with a shield and a drone active", badge: "★", tint: "#dff2ff" },
   { id: ACHIEVEMENTS.survivor, name: "Survivor", description: "Reach the danger zone and recover to 1 hex", badge: "♥", tint: "#ff5c6e" },
+  { id: ACHIEVEMENTS.challengeBlock1, name: "First Steps", description: "Complete every challenge in Block 1", badge: "C1", tint: "#5b8bff" },
+  { id: ACHIEVEMENTS.challengeBlock2, name: "Climbing", description: "Complete every challenge in Block 2", badge: "C2", tint: "#7aa3ff" },
+  { id: ACHIEVEMENTS.challengeBlock3, name: "Halfway There", description: "Complete every challenge in Block 3", badge: "C3", tint: "#ffd76b" },
+  { id: ACHIEVEMENTS.challengeBlock4, name: "Hex Veteran", description: "Complete every challenge in Block 4", badge: "C4", tint: "#ff8e3c" },
+  { id: ACHIEVEMENTS.challengeBlock5, name: "Brink of Mastery", description: "Complete every challenge in Block 5", badge: "C5", tint: "#ff5c6e" },
+  { id: ACHIEVEMENTS.challengeBlock6, name: "Hex Master", description: "Complete every challenge in Block 6", badge: "C6", tint: "#e6d6ff" },
 ];
 
 const META_BY_ID = new Map<AchievementId, AchievementMeta>(

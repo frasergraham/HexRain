@@ -7,3 +7,4 @@ dist
 # The encoded mp3s in src/assets/audio/ are the canonical assets;
 # WAVs stay local for re-encoding but are not committed.
 *.wav
+ios/build

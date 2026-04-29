@@ -37,7 +37,16 @@ import {
   stopMusic,
 } from "./audio";
 import { Player } from "./player";
-import type { Axial, ClusterKind, Difficulty, GameState, InputAction, Shape } from "./types";
+import type { Axial, ClusterKind, Difficulty, GameMode, GameState, InputAction, Shape, WallKind } from "./types";
+import { ANGLE_TABLE, parseWaveLine, type ParsedWave } from "./waveDsl";
+import {
+  CHALLENGES,
+  challengeById,
+  loadChallengeProgress,
+  saveChallengeBest,
+  saveChallengeCompletion,
+  type ChallengeDef,
+} from "./challenges";
 
 // Score-club achievements are difficulty-gated: easy earns none, medium
 // earns the standard ladder, and hard earns the Elite ladder. The
@@ -355,6 +364,24 @@ export class Game {
   // at varied speeds) rather than a regular cluster wave.
   private swarmWave = false;
 
+  // Game mode + challenge runtime state. In "endless" mode the existing
+  // wave/calm system runs as before. In "challenge" mode advanceChallenge
+  // takes over the spawning, walls, and progression.
+  private gameMode: GameMode = "endless";
+  private activeChallenge: ChallengeDef | null = null;
+  private challengeWaveIdx = 0;
+  private challengeWaveTimer = 0;
+  private challengeSlotTimer = 0;
+  private challengeSpawnTimer = 0;
+  private challengeSlotIdx = 0;
+  private challengeProbCount = 0;
+  private currentParsedWave: ParsedWave | null = null;
+  private effectOverrides: ChallengeDef["effects"] | null = null;
+  private progress = 0;
+  private progressDisplayed = 0;
+  private waveBumpT = 0; // pulse the progress bar when wave index increments
+  private challengeFinishingHold = 0; // wait for screen to clear before completion
+
   // Time-effect (slow/fast power-ups). timeScale modifies engine + game-logic
   // dt; the visual trail uses timeEffect to decide bubble vs speed-line.
   private timeEffect: "slow" | "fast" | null = null;
@@ -367,11 +394,33 @@ export class Game {
   private slowUpFired = false;
   private timeScale = 1;
 
-  // Optional inward-narrowing pinch active in late game (score >= the
-  // current difficulty's narrowingScore). 0 = full board, 1 = fully
-  // pinched. Animates on/off.
-  private pinch = 0;
-  private pinchTarget = 0;
+  // Wall system. The board can narrow inward via three kinds:
+  //  - "pinch":  classic inset both sides (0.6 * half-board at amount=1).
+  //  - "narrow": tighter inset (0.85 * half-board) for dense gauntlets.
+  //  - "zigzag": the inset varies sinusoidally with y, creating slanted
+  //              corridors. Can push the player horizontally on contact.
+  // Only one kind is active at a time. amount lerps toward amountTarget.
+  private wall: {
+    kind: WallKind;
+    amount: number;
+    amountTarget: number;
+    amp: number;
+    period: number;
+    phase: number;
+    // Used by the zigzag push to hold direction stable around zero
+    // crossings.
+    pushHoldT: number;
+    pushDir: 0 | -1 | 1;
+  } = {
+    kind: "none",
+    amount: 0,
+    amountTarget: 0,
+    amp: 0.18,
+    period: 1.4,
+    phase: 0,
+    pushHoldT: 0,
+    pushDir: 0,
+  };
 
   // Three-plane starfield. Generated on resize and whenever the score
   // crosses a tier threshold, drawn behind everything with a small
@@ -653,7 +702,70 @@ export class Game {
       const playBtn = target?.closest('button[data-action="play"]') as HTMLButtonElement | null;
       if (playBtn) {
         playSfx("click");
+        if (this.state === "challengeComplete" || this.state === "challengeIntro") {
+          // Replay the active challenge.
+          if (this.activeChallenge) this.beginChallengeStart(this.activeChallenge);
+          return;
+        }
+        // From challenge gameover, "play again" repeats the same challenge.
+        if (this.state === "gameover" && this.gameMode === "challenge" && this.activeChallenge) {
+          this.beginChallengeStart(this.activeChallenge);
+          return;
+        }
+        this.gameMode = "endless";
+        this.activeChallenge = null;
+        this.effectOverrides = null;
         this.startOrRestart();
+        return;
+      }
+      // CHALLENGES menu button.
+      const challengesBtn = target?.closest('button[data-action="challenges"]') as HTMLButtonElement | null;
+      if (challengesBtn) {
+        playSfx("click");
+        this.openChallengeSelect();
+        return;
+      }
+      // Challenge card pick.
+      const challengeCard = target?.closest('button[data-challenge-id]') as HTMLButtonElement | null;
+      if (challengeCard) {
+        const id = challengeCard.dataset.challengeId;
+        if (challengeCard.classList.contains("locked") || !id) return;
+        playSfx("click");
+        const def = challengeById(id);
+        if (def) this.openChallengeIntro(def);
+        return;
+      }
+      // Back from challenge select / intro / complete.
+      const backBtn = target?.closest('button[data-action="challenge-back"]') as HTMLButtonElement | null;
+      if (backBtn) {
+        playSfx("click");
+        if (this.state === "challengeIntro" || this.state === "challengeComplete") {
+          this.openChallengeSelect();
+        } else {
+          this.gameMode = "endless";
+          this.activeChallenge = null;
+          this.effectOverrides = null;
+          this.state = "menu";
+          this.renderMenu();
+        }
+        return;
+      }
+      // Challenge GO! button (intro overlay).
+      const goBtn = target?.closest('button[data-action="challenge-go"]') as HTMLButtonElement | null;
+      if (goBtn) {
+        playSfx("click");
+        if (this.activeChallenge) this.beginChallengeStart(this.activeChallenge);
+        return;
+      }
+      // Quit from challenge gameover/complete to challenge select.
+      const challengeQuitBtn = target?.closest('button[data-action="challenge-menu"]') as HTMLButtonElement | null;
+      if (challengeQuitBtn) {
+        playSfx("click");
+        this.gameMode = "endless";
+        this.activeChallenge = null;
+        this.effectOverrides = null;
+        this.state = "menu";
+        this.renderMenu();
         return;
       }
       // Achievement badges (iOS) open the GameKit achievements view.
@@ -900,6 +1012,145 @@ export class Game {
     if (this.pauseBtn) this.pauseBtn.hidden = !visible;
   }
 
+  // ----- Challenge UI ---------------------------------------------------
+
+  private openChallengeSelect(): void {
+    this.state = "challengeSelect";
+    this.setScoreVisible(false);
+    this.setPauseButtonVisible(false);
+    this.renderChallengeSelect();
+    this.overlay.classList.remove("hidden");
+  }
+
+  private openChallengeIntro(def: ChallengeDef): void {
+    this.activeChallenge = def;
+    this.state = "challengeIntro";
+    this.renderChallengeIntro();
+  }
+
+  private beginChallengeStart(def: ChallengeDef): void {
+    // Move from intro/replay/select directly into a fresh challenge run.
+    this.state = "playing";
+    this.overlay.classList.add("hidden");
+    this.setScoreVisible(true);
+    this.setPauseButtonVisible(true);
+    this.setSliderEnabled(true);
+    this.resetRunState(0);
+    this.startChallenge(def);
+    setMusicSpeed(1);
+    startMusic();
+  }
+
+  private renderChallengeSelect(): void {
+    const progress = loadChallengeProgress();
+    const blocks: ChallengeDef[][] = [[], [], [], [], [], []];
+    for (const c of CHALLENGES) blocks[c.block - 1]!.push(c);
+    for (const arr of blocks) arr.sort((a, b) => a.index - b.index);
+    const blockHtml = blocks.map((arr, idx) => {
+      const blockNum = idx + 1;
+      const unlocked = progress.unlockedBlocks.includes(blockNum);
+      const completedInBlock = arr.filter((c) => progress.completed.includes(c.id)).length;
+      const cards = arr.map((c) => {
+        const best = progress.best[c.id] ?? 0;
+        const done = progress.completed.includes(c.id);
+        const cardCls = !unlocked
+          ? "challenge-card locked"
+          : done ? "challenge-card completed" : "challenge-card";
+        const bestText = !unlocked ? "" : best > 0 ? `Best: ${best}` : "Best: —";
+        const name = unlocked ? escapeHtml(c.name) : "???";
+        const hexes: string[] = [];
+        for (let i = 0; i < 5; i++) {
+          const filled = i < c.difficulty;
+          const tint = ["#5b8bff", "#7aa3ff", "#ffd76b", "#ff8e3c", "#e64545"][c.difficulty - 1] || "#5b8bff";
+          hexes.push(
+            `<span class="challenge-card-hex" style="background:${filled ? tint : "transparent"}; border:1px solid ${tint};"></span>`,
+          );
+        }
+        const check = done ? '<span class="check">✓</span>' : "";
+        return `
+          <button type="button" class="${cardCls}" data-challenge-id="${c.id}" ${unlocked ? "" : "disabled"}>
+            <span class="challenge-card-id">${c.id}</span>
+            <span class="challenge-card-name">${name}</span>
+            <div class="challenge-card-hexes">${hexes.join("")}</div>
+            <span class="challenge-card-best">${bestText}</span>
+            ${check}
+          </button>
+        `;
+      }).join("");
+      const subhint = unlocked
+        ? blockNum < 6
+          ? `Complete 3 of 5 to unlock Block ${blockNum + 1}`
+          : "Final block"
+        : `Complete 3 in Block ${blockNum - 1} to unlock`;
+      return `
+        <section class="challenge-block">
+          <header class="challenge-block-header">
+            <span>Block ${blockNum}</span>
+            <span class="progress">${completedInBlock}/5 ${unlocked ? "" : "·"} ${subhint}</span>
+          </header>
+          <div class="challenge-cards">${cards}</div>
+        </section>
+      `;
+    }).join("");
+    this.overlay.innerHTML = `
+      <div class="challenge-select">
+        <div class="challenge-select-top">
+          <button type="button" class="challenge-back" data-action="challenge-back">← Back</button>
+          <span style="font-size:13px; letter-spacing:0.18em; text-transform:uppercase; color:#aab4dc;">Challenges</span>
+          <span style="width:60px"></span>
+        </div>
+        ${blockHtml}
+      </div>
+    `;
+  }
+
+  private renderChallengeIntro(): void {
+    const def = this.activeChallenge;
+    if (!def) return;
+    const progress = loadChallengeProgress();
+    const best = progress.best[def.id] ?? 0;
+    const hexes: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      const filled = i < def.difficulty;
+      const tint = ["#5b8bff", "#7aa3ff", "#ffd76b", "#ff8e3c", "#e64545"][def.difficulty - 1] || "#5b8bff";
+      hexes.push(
+        `<span class="challenge-card-hex" style="background:${filled ? tint : "transparent"}; border:1px solid ${tint}; width:14px; height:16px;"></span>`,
+      );
+    }
+    this.overlay.innerHTML = `
+      <div class="challenge-intro">
+        <span class="id">${def.id}</span>
+        <h1>${escapeHtml(def.name)}</h1>
+        <div class="challenge-card-hexes" style="gap:4px;">${hexes.join("")}</div>
+        <p class="meta">${def.waves.length} waves${best > 0 ? ` · Best: ${best}` : ""}</p>
+        <button type="button" class="play-btn" data-action="challenge-go">START</button>
+        <button type="button" class="challenge-back" data-action="challenge-back">← Back</button>
+      </div>
+    `;
+    this.overlay.classList.remove("hidden");
+  }
+
+  private renderChallengeComplete(): void {
+    const def = this.activeChallenge;
+    if (!def) return;
+    const progress = loadChallengeProgress();
+    const best = progress.best[def.id] ?? 0;
+    const newBest = this.score >= best;
+    this.overlay.innerHTML = `
+      <div class="challenge-intro">
+        <p class="challenge-complete-banner">Challenge Complete</p>
+        <span class="id">${def.id}</span>
+        <h1>${escapeHtml(def.name)}</h1>
+        <p class="tagline">Score ${this.score}${newBest ? " · NEW BEST" : ` · Best ${best}`}</p>
+        <button type="button" class="play-btn" data-action="play">PLAY AGAIN</button>
+        <button type="button" class="challenge-back" data-action="challenge-back">Back</button>
+        <button type="button" class="challenge-back" data-action="challenge-menu">Main menu</button>
+      </div>
+    `;
+    this.overlay.classList.remove("hidden");
+    this.setScoreVisible(false);
+  }
+
   private setSliderEnabled(enabled: boolean): void {
     const movePadEl = document.getElementById("movepad");
     if (!movePadEl) return;
@@ -1004,8 +1255,12 @@ export class Game {
     this.rotateTutorialStartAngle = 0;
     this.fastLevel = 0;
     this.fastBonus = 0;
-    this.pinch = 0;
-    this.pinchTarget = 0;
+    this.wall.kind = "none";
+    this.wall.amount = 0;
+    this.wall.amountTarget = 0;
+    this.wall.phase = 0;
+    this.wall.pushHoldT = 0;
+    this.wall.pushDir = 0;
     this.rotationDragActive = false;
     this.slideTarget = null;
 
@@ -1057,6 +1312,21 @@ export class Game {
   }
 
   private renderGameOver(): void {
+    if (this.gameMode === "challenge" && this.activeChallenge) {
+      const def = this.activeChallenge;
+      const progress = loadChallengeProgress();
+      const best = progress.best[def.id] ?? 0;
+      this.overlay.innerHTML = `
+        <h1>GAME OVER</h1>
+        <p class="tagline">${escapeHtml(def.name)} · ${def.id}</p>
+        <p class="tagline">Score ${this.score} · Best ${best}</p>
+        <button type="button" class="play-btn" data-action="play">RETRY</button>
+        <button type="button" class="challenge-back" data-action="challenge-back">Back to challenges</button>
+        <button type="button" class="challenge-back" data-action="challenge-menu">Main menu</button>
+      `;
+      this.overlay.classList.remove("hidden");
+      return;
+    }
     this.overlay.innerHTML = `
       <h1>GAME OVER</h1>
       <p class="tagline">Score ${this.score} &middot; Best ${this.best}</p>
@@ -1076,7 +1346,22 @@ export class Game {
 
   private onInput(action: InputAction, pressed: boolean): void {
     if (action === "confirm" && pressed) {
+      if (this.state === "challengeIntro" && this.activeChallenge) {
+        this.beginChallengeStart(this.activeChallenge);
+        return;
+      }
+      if (this.state === "challengeComplete" && this.activeChallenge) {
+        this.beginChallengeStart(this.activeChallenge);
+        return;
+      }
+      if (this.state === "gameover" && this.gameMode === "challenge" && this.activeChallenge) {
+        this.beginChallengeStart(this.activeChallenge);
+        return;
+      }
       if (this.state === "menu" || this.state === "gameover") {
+        this.gameMode = "endless";
+        this.activeChallenge = null;
+        this.effectOverrides = null;
         this.startOrRestart();
         return;
       }
@@ -1192,8 +1477,19 @@ export class Game {
     }
 
     // Pinch interpolates toward target each real-frame.
-    const pinchLerp = 1 - Math.exp(-dt * 4);
-    this.pinch += (this.pinchTarget - this.pinch) * pinchLerp;
+    const wallLerp = 1 - Math.exp(-dt * 4);
+    this.wall.amount += (this.wall.amountTarget - this.wall.amount) * wallLerp;
+    if (this.wall.kind === "zigzag") this.wall.phase += dt;
+    // Decay the zigzag push-direction hold so direction can flip again
+    // once the player has cleared the prior wall sweep.
+    if (this.wall.pushHoldT > 0) {
+      this.wall.pushHoldT = Math.max(0, this.wall.pushHoldT - dt);
+      if (this.wall.pushHoldT === 0) this.wall.pushDir = 0;
+    }
+    // Allow a kind change once the previous wall has fully retracted.
+    if (this.wall.kind !== "none" && this.wall.amountTarget === 0 && this.wall.amount < 0.01) {
+      this.wall.kind = "none";
+    }
 
     // ROTATE tutorial: tick its timer and dismiss when the player has
     // turned the blob enough or 5 seconds have passed.
@@ -1262,15 +1558,23 @@ export class Game {
     // enough (or after a hard timeout).
     this.updateSticksInFlight(dt);
 
-    // Wave/calm phase progression — uses gameDt so wave length feels right
-    // during slow-mo, but spawn cadence is the same dilation.
-    this.advanceWavePhase(gameDt);
+    if (this.gameMode === "endless") {
+      // Wave/calm phase progression — uses gameDt so wave length feels right
+      // during slow-mo, but spawn cadence is the same dilation.
+      this.advanceWavePhase(gameDt);
 
-    // Spawn.
-    this.spawnTimer -= gameDt;
-    if (this.spawnTimer <= 0) {
-      this.spawnCluster();
-      this.spawnTimer = this.currentSpawnInterval();
+      // Spawn.
+      this.spawnTimer -= gameDt;
+      if (this.spawnTimer <= 0) {
+        this.spawnCluster();
+        this.spawnTimer = this.currentSpawnInterval();
+      }
+    } else {
+      this.advanceChallenge(gameDt);
+      this.updateChallengeFinishing(dt);
+      // Smooth the progress value for a calm climbing animation.
+      this.progressDisplayed += (this.progress - this.progressDisplayed) * (1 - Math.exp(-dt * 6));
+      if (this.waveBumpT > 0) this.waveBumpT = Math.max(0, this.waveBumpT - dt);
     }
 
     // Step physics with scaled time.
@@ -1825,7 +2129,7 @@ export class Game {
 
   private handleShieldContact(cluster: FallingCluster): void {
     playSfx("shield");
-    this.shieldTimer = SHIELD_DURATION * this.cfg().effectDurationMul;
+    this.shieldTimer = this.shieldDuration();
     const center = cluster.body.position;
     this.spawnFloater(
       "SHIELD",
@@ -2059,7 +2363,7 @@ export class Game {
     const dx = (bounds.max.x - bounds.min.x) / 2;
     const dy = (bounds.max.y - bounds.min.y) / 2;
     const radius = Math.hypot(dx, dy) + this.hexSize * 0.5;
-    const shieldMax = SHIELD_DURATION * this.cfg().effectDurationMul;
+    const shieldMax = this.shieldDuration();
     const t = Math.min(1, this.shieldTimer / shieldMax);
     const pulse = (Math.sin(performance.now() * 0.006) + 1) * 0.5;
 
@@ -2111,8 +2415,8 @@ export class Game {
       amplitude,
       phase: Math.random() * Math.PI * 2,
       speed: DRONE_OSCILLATION_SPEED,
-      lifetime: DRONE_DURATION * this.cfg().effectDurationMul,
-      maxLifetime: DRONE_DURATION * this.cfg().effectDurationMul,
+      lifetime: this.droneDuration(),
+      maxLifetime: this.droneDuration(),
       pulse: Math.random() * Math.PI * 2,
     });
   }
@@ -2489,7 +2793,7 @@ export class Game {
       playSfx("slow_down");
       this.timeEffect = "slow";
       this.timeScale = SLOW_TIMESCALE;
-      const slowDur = SLOW_EFFECT_DURATION * this.cfg().effectDurationMul;
+      const slowDur = this.slowDuration();
       this.timeEffectTimer = slowDur;
       this.timeEffectMax = slowDur;
       this.slowFromPickup = true;
@@ -2502,8 +2806,8 @@ export class Game {
       this.fastLevel += 1;
       this.timeEffect = "fast";
       this.timeScale = FAST_TIMESCALE_BASE + (this.fastLevel - 1) * FAST_TIMESCALE_STEP;
-      this.timeEffectTimer = FAST_EFFECT_DURATION;
-      this.timeEffectMax = FAST_EFFECT_DURATION;
+      this.timeEffectTimer = this.fastDuration();
+      this.timeEffectMax = this.fastDuration();
       const mul = this.fastMultiplier();
       // Multiplier achievements fire only on payout (in awardFastBonus),
       // not on pickup — picking up 6X but losing it on a blue hit
@@ -2731,6 +3035,330 @@ export class Game {
     Composite.add(this.engine.world, cluster.body);
   }
 
+  // ----- Challenge runtime ----------------------------------------------
+
+  // Public entry point: switch the engine into challenge mode and start
+  // the named challenge. Caller is responsible for state-machine bookkeeping
+  // (overlay hide, hud reveal, etc).
+  startChallenge(def: ChallengeDef): void {
+    this.gameMode = "challenge";
+    this.activeChallenge = def;
+    this.effectOverrides = def.effects ?? null;
+    this.challengeWaveIdx = 0;
+    this.challengeSlotIdx = 0;
+    this.challengeProbCount = 0;
+    this.challengeWaveTimer = 0;
+    this.challengeSlotTimer = 0;
+    this.challengeSpawnTimer = 0;
+    this.challengeFinishingHold = 0;
+    this.progress = 0;
+    this.progressDisplayed = 0;
+    this.beginChallengeWave();
+  }
+
+  private beginChallengeWave(): void {
+    const def = this.activeChallenge;
+    if (!def) return;
+    if (this.challengeWaveIdx >= def.waves.length) return;
+    const line = def.waves[this.challengeWaveIdx]!;
+    let parsed: ParsedWave;
+    try {
+      parsed = parseWaveLine(line);
+    } catch (err) {
+      console.error(`[challenge ${def.id}] wave ${this.challengeWaveIdx + 1} parse error:`, err);
+      // Skip the bad wave so the run doesn't deadlock.
+      this.challengeWaveIdx += 1;
+      this.beginChallengeWave();
+      return;
+    }
+    this.currentParsedWave = parsed;
+    this.challengeSlotIdx = 0;
+    this.challengeProbCount = 0;
+    this.challengeWaveTimer = parsed.durOverride ?? 0;
+    this.challengeSlotTimer = parsed.slotInterval;
+    this.challengeSpawnTimer = parsed.spawnInterval;
+
+    // Apply walls. Wall.amount lerps; setting kind+target is enough.
+    if (parsed.walls === "none") {
+      this.setWall("none", 0);
+    } else if (parsed.walls === "zigzag") {
+      this.setWall("zigzag", 1.0, { amp: parsed.wallAmp, period: parsed.wallPeriod });
+    } else if (parsed.walls === "narrow") {
+      this.setWall("narrow", 1.0);
+    } else {
+      this.setWall("pinch", 0.6);
+    }
+
+    // Pick a safe column (or skip enforcement) for the prob stream.
+    if (parsed.safeCol === "none") {
+      this.safeColumn = 99; // out-of-range so filter never bans a column
+    } else if (typeof parsed.safeCol === "number") {
+      this.safeColumn = parsed.safeCol - 4;
+    } else {
+      const halfFull = Math.floor(BOARD_COLS / 2);
+      this.safeColumn = Math.floor(Math.random() * (halfFull * 2 + 1)) - halfFull;
+    }
+
+    // Pulse the progress bar on every wave boundary except the first.
+    if (this.challengeWaveIdx > 0) this.waveBumpT = 0.2;
+  }
+
+  private advanceChallenge(dt: number): void {
+    const def = this.activeChallenge;
+    const wave = this.currentParsedWave;
+    if (!def || !wave) return;
+
+    // Hard wall: dur expired.
+    if (wave.durOverride !== null) {
+      this.challengeWaveTimer -= dt;
+    }
+
+    // Slot stream.
+    if (wave.slots.length > 0 && this.challengeSlotIdx < wave.slots.length) {
+      this.challengeSlotTimer -= dt;
+      if (this.challengeSlotTimer <= 0) {
+        const slot = wave.slots[this.challengeSlotIdx]!;
+        if (slot !== null) this.spawnFromSlot(slot, wave);
+        this.challengeSlotIdx += 1;
+        this.challengeSlotTimer = wave.slotInterval;
+      }
+    }
+
+    // Probabilistic stream.
+    const probLimit = wave.countCap;
+    const probEnabled = (probLimit === null || this.challengeProbCount < probLimit);
+    if (probEnabled) {
+      this.challengeSpawnTimer -= dt;
+      if (this.challengeSpawnTimer <= 0) {
+        this.spawnChallengeProbabilistic(wave);
+        this.challengeProbCount += 1;
+        this.challengeSpawnTimer = wave.spawnInterval;
+      }
+    }
+
+    // Compute progress: per-wave portion = (slotsFired + probsFired) /
+    // expected. expected falls back to 1 if neither is set (won't happen
+    // under the validator).
+    const slotsTotal = wave.slots.length;
+    const probTotal = probLimit ?? Math.max(0, Math.floor((wave.durOverride ?? 0) / wave.spawnInterval));
+    const expected = Math.max(1, slotsTotal + probTotal);
+    const fired = this.challengeSlotIdx + this.challengeProbCount;
+    const within = Math.min(1, fired / expected);
+    this.progress = (this.challengeWaveIdx + within) / def.waves.length;
+
+    // Wave end?
+    const slotsDone = this.challengeSlotIdx >= slotsTotal;
+    const probDone = probLimit === null ? false : this.challengeProbCount >= probLimit;
+    const durDone = wave.durOverride !== null && this.challengeWaveTimer <= 0;
+    const streamsDone = slotsDone && (probLimit === null ? slotsTotal > 0 : probDone);
+    if (durDone || streamsDone) {
+      this.challengeWaveIdx += 1;
+      if (this.challengeWaveIdx < def.waves.length) {
+        this.beginChallengeWave();
+      } else {
+        this.currentParsedWave = null;
+        // Defer completion until the screen is empty AND no fast bonus
+        // is mid-payout, so the trailing animation lands under this run's
+        // banner and not the next state.
+        this.challengeFinishingHold = 0.5;
+      }
+    }
+  }
+
+  // Convert a slot to actual spawn parameters and spawn a normal cluster.
+  private spawnFromSlot(slot: { size: number; col: number; angleIdx: number }, wave: ParsedWave): void {
+    const sizeRaw = Math.max(1, Math.min(5, slot.size));
+    let size = sizeRaw;
+    // Narrow walls can't fit size-5 polyhexes through the corridor; clamp.
+    if (wave.walls === "narrow" && size >= 5) size = 3;
+    const shape = buildPolyhexShape(size, Math.random);
+
+    const angle = ANGLE_TABLE[Math.max(0, Math.min(9, slot.angleIdx))] as {
+      tilt: number;
+      sideEntry?: "left" | "right" | "random";
+      randomTilt?: number;
+    };
+    const halfFull = Math.floor(BOARD_COLS / 2);
+    // Map slot col 0..9 onto the active rail's column range.
+    const insetTop = this.wallInsetAt(this.boardOriginY);
+    const colWidth = SQRT3 * this.hexSize;
+    const insetCols = Math.max(insetTop.left, insetTop.right) / Math.max(1, colWidth);
+    const halfActive = Math.max(1, Math.floor(halfFull - insetCols));
+    const colStep = -halfActive + Math.round((slot.col / 9) * (halfActive * 2));
+    const railLeft = this.currentRailLeft();
+    const railRight = this.currentRailRight();
+    const railCenter = (railLeft + railRight) / 2;
+    const speed = this.computeFallSpeed() * wave.baseSpeedMul;
+
+    let x: number;
+    let y: number;
+    let vx: number;
+    let vy: number;
+    if (angle.sideEntry) {
+      // Side entry — mid-screen y, horizontal entry vector.
+      const halfBoard = this.boardHeight * 0.5;
+      const yMin = this.hexSize * 2;
+      const yMax = Math.max(yMin + this.hexSize, halfBoard - this.hexSize);
+      y = this.boardOriginY + yMin + Math.random() * (yMax - yMin);
+      const sideAngle = 0.25 + Math.random() * 0.25;
+      const total = speed * 1.05;
+      const fromLeft = angle.sideEntry === "left" || (angle.sideEntry === "random" && Math.random() < 0.5);
+      if (fromLeft) {
+        x = this.boardOriginX - this.hexSize * 3;
+        vx = Math.cos(sideAngle) * total;
+        vy = Math.sin(sideAngle) * total;
+      } else {
+        x = this.boardOriginX + this.boardWidth + this.hexSize * 3;
+        vx = -Math.cos(sideAngle) * total;
+        vy = Math.sin(sideAngle) * total;
+      }
+    } else {
+      x = railCenter + colStep * colWidth;
+      y = this.boardOriginY - this.hexSize * 4;
+      const tilt = angle.tilt + (angle.randomTilt ? (Math.random() - 0.5) * angle.randomTilt : 0) + wave.defaultDir;
+      vx = Math.sin(tilt) * speed;
+      vy = Math.cos(tilt) * speed;
+    }
+
+    this.spawnChallengeCluster("normal", shape, x, y, vx, vy);
+  }
+
+  // Pick a probabilistic kind based on wave weights, then spawn.
+  private spawnChallengeProbabilistic(wave: ParsedWave): void {
+    const total = Object.values(wave.weights).reduce((a, b) => a + (b ?? 0), 0);
+    if (total <= 0) return;
+    let r = Math.random() * total;
+    let kind: ClusterKind = "normal";
+    for (const [k, w] of Object.entries(wave.weights)) {
+      const ww = w ?? 0;
+      if (ww <= 0) continue;
+      if (r < ww) { kind = k as ClusterKind; break; }
+      r -= ww;
+    }
+
+    // Pickup kinds always single-cell.
+    const isPickup = kind === "coin" || kind === "shield" || kind === "drone";
+    let shape: Shape;
+    if (isPickup) {
+      shape = COIN_SHAPE;
+    } else {
+      const sz = wave.sizeMin + Math.floor(Math.random() * (wave.sizeMax - wave.sizeMin + 1));
+      const sizeClamped = wave.walls === "narrow" && sz >= 5 ? 3 : sz;
+      shape = buildPolyhexShape(Math.max(1, Math.min(5, sizeClamped)), Math.random);
+    }
+
+    // Pick a column avoiding the safe lane for prob spawns.
+    const colStep = this.pickSpawnColumn(shape);
+    if (colStep === null) return;
+    const railLeft = this.currentRailLeft();
+    const railRight = this.currentRailRight();
+    const railCenter = (railLeft + railRight) / 2;
+    const colWidth = SQRT3 * this.hexSize;
+    const x = railCenter + colStep * colWidth;
+    const y = this.boardOriginY - this.hexSize * 4;
+    const speed = this.computeFallSpeed() * wave.baseSpeedMul;
+    const tilt = wave.defaultDir;
+    const vx = Math.sin(tilt) * speed;
+    const vy = Math.cos(tilt) * speed;
+    this.spawnChallengeCluster(kind, shape, x, y, vx, vy);
+  }
+
+  // Build a FallingCluster from explicit parameters and add it to the
+  // world, mirroring spawnCluster's wiring.
+  private spawnChallengeCluster(
+    kind: ClusterKind,
+    shape: Shape,
+    x: number,
+    y: number,
+    vx: number,
+    vy: number,
+  ): void {
+    const speed = Math.max(0.5, Math.hypot(vx, vy));
+    const cluster = FallingCluster.spawn({
+      shape,
+      x,
+      y,
+      hexSize: this.hexSize,
+      kind,
+      initialSpeedY: speed,
+      initialSpin: (Math.random() - 0.5) * 0.08,
+    });
+    Body.setVelocity(cluster.body, { x: vx, y: vy });
+    cluster.body.collisionFilter.category = CAT_CLUSTER;
+    cluster.body.collisionFilter.mask = CAT_PLAYER | CAT_CLUSTER | CAT_DRONE;
+    for (let i = 1; i < cluster.body.parts.length; i++) {
+      cluster.body.parts[i]!.collisionFilter.category = CAT_CLUSTER;
+      cluster.body.parts[i]!.collisionFilter.mask = CAT_PLAYER | CAT_CLUSTER | CAT_DRONE;
+    }
+    if (!this.seenKinds.has(kind)) {
+      cluster.hintLabel = kindLabel(kind);
+      this.seenKinds.add(kind);
+      saveSeenHints(this.seenKinds);
+    }
+    this.clusters.push(cluster);
+    this.clusterByBodyId.set(cluster.body.id, cluster);
+    Composite.add(this.engine.world, cluster.body);
+  }
+
+  private updateChallengeFinishing(dt: number): void {
+    if (this.gameMode !== "challenge") return;
+    if (this.challengeFinishingHold <= 0) return;
+    if (this.activeChallenge === null) return;
+    if (this.challengeWaveIdx < this.activeChallenge.waves.length) return;
+    // Wait for clusters to clear before fully completing.
+    if (this.clusters.length > 0) return;
+    if (this.timeEffect === "fast") return;
+    this.challengeFinishingHold -= dt;
+    if (this.challengeFinishingHold <= 0) {
+      this.completeChallenge();
+    }
+  }
+
+  private completeChallenge(): void {
+    const def = this.activeChallenge;
+    if (!def) return;
+    // +20 completion bonus.
+    this.score += 20;
+    this.scoreEl.textContent = String(this.score);
+    this.spawnFloater(
+      "+20",
+      this.boardOriginX + this.boardWidth / 2,
+      this.boardOriginY + this.boardHeight * 0.4,
+      "#9bf0c2",
+      "rgba(120, 255, 170, 0.95)",
+    );
+
+    const progress = saveChallengeCompletion(def.id, this.score);
+    // Block completion → achievement.
+    const block = def.block;
+    const allInBlockDone = CHALLENGES
+      .filter((c) => c.block === block)
+      .every((c) => progress.completed.includes(c.id));
+    if (allInBlockDone) {
+      const achId = ([
+        ACHIEVEMENTS.challengeBlock1,
+        ACHIEVEMENTS.challengeBlock2,
+        ACHIEVEMENTS.challengeBlock3,
+        ACHIEVEMENTS.challengeBlock4,
+        ACHIEVEMENTS.challengeBlock5,
+        ACHIEVEMENTS.challengeBlock6,
+      ] as const)[block - 1];
+      if (achId) void reportAchievement(achId);
+    }
+
+    this.state = "challengeComplete";
+    this.setPauseButtonVisible(false);
+    stopMusic();
+    this.renderChallengeComplete();
+  }
+
+  // Called from death path to bank a partial-run best score and exit.
+  private endChallengeRun(): void {
+    const def = this.activeChallenge;
+    if (!def) return;
+    saveChallengeBest(def.id, this.score);
+  }
+
   // ----- Wave / difficulty system -----
 
   private waveParams() {
@@ -2809,18 +3437,14 @@ export class Game {
     this.safeColumn = Math.floor(Math.random() * (half * 2 + 1)) - half;
     // Late game: half of waves narrow the play area. Hard kicks this in
     // earlier (200) than easy/medium (600).
-    if (this.score >= this.cfg().narrowingScore && Math.random() < 0.5) {
-      this.pinchTarget = 0.35; // 35% inset from each side
-    } else {
-      this.pinchTarget = 0;
-    }
+    this.chooseWallForEndlessWave();
   }
 
   private startCalm(): void {
     this.wavePhase = "calm";
     this.wavePhaseTimer = 0;
     this.swarmWave = false;
-    this.pinchTarget = 0;
+    this.setWall("none", 0);
   }
 
   private loadDifficulty(): Difficulty {
@@ -2866,14 +3490,186 @@ export class Game {
   }
 
   // Inner left/right edges of the play area, accounting for the animated
-  // pinch when active.
-  currentRailLeft(): number {
-    const inset = this.pinch * this.boardWidth * 0.5 * 0.6;
-    return this.boardOriginX + inset;
+  // pinch / zigzag / narrow when active.
+  currentRailLeft(yWorld?: number): number {
+    return this.boardOriginX + this.wallInsetAt(yWorld).left;
   }
-  currentRailRight(): number {
-    const inset = this.pinch * this.boardWidth * 0.5 * 0.6;
-    return this.boardOriginX + this.boardWidth - inset;
+  currentRailRight(yWorld?: number): number {
+    return this.boardOriginX + this.boardWidth - this.wallInsetAt(yWorld).right;
+  }
+
+  // Single source of truth for how far the active wall reaches in from
+  // each side at world y. Pinch and narrow are y-independent; zigzag's
+  // inset varies sinusoidally with y to make the corridor slant.
+  // Set wall kind and target amount. Caller is responsible for
+  // not switching kinds while the previous one is still visible — the
+  // update loop guards by holding the kind until amount drops to ~0.
+  private setWall(kind: WallKind, amount: number, ampPeriod?: { amp: number; period: number }): void {
+    this.wall.kind = kind;
+    this.wall.amountTarget = amount;
+    if (ampPeriod) {
+      this.wall.amp = ampPeriod.amp;
+      this.wall.period = ampPeriod.period;
+    } else {
+      this.wall.amp = 0.18;
+      this.wall.period = 1.4;
+    }
+    if (kind === "none") {
+      this.wall.pushHoldT = 0;
+      this.wall.pushDir = 0;
+    }
+  }
+
+  // Pick a wall kind for an endless wave based on score.
+  // narrow > zigzag > pinch > none. Mutually exclusive.
+  private chooseWallForEndlessWave(): void {
+    const r = Math.random();
+    if (this.score >= 1000 && r < 0.40) {
+      this.setWall("narrow", 1.0);
+    } else if (this.score >= 800 && r < 0.40) {
+      this.setWall("zigzag", 1.0);
+    } else if (this.score >= this.cfg().narrowingScore && r < 0.50) {
+      this.setWall("pinch", 0.6);
+    } else {
+      this.setWall("none", 0);
+    }
+  }
+
+  // Draw the active wall slabs into the play area.
+  // Draw the vertical challenge-progress strip at the left edge of the
+  // play area. Fills bottom-up; tick marks per wave boundary; brief pulse
+  // on each wave increment.
+  private drawChallengeProgress(ctx: CanvasRenderingContext2D): void {
+    const def = this.activeChallenge;
+    if (!def) return;
+    const baseW = 6;
+    const w = baseW + (this.waveBumpT > 0 ? 4 * this.waveBumpT * 5 : 0);
+    const x = this.boardOriginX - baseW - 4;
+    const y0 = this.boardOriginY;
+    const h = this.boardHeight;
+    ctx.fillStyle = "rgba(255,255,255,0.07)";
+    ctx.fillRect(x, y0, w, h);
+    const fill = h * Math.min(1, Math.max(0, this.progressDisplayed));
+    ctx.fillStyle = "#7fe89c";
+    ctx.fillRect(x, y0 + h - fill, w, fill);
+    // Tick marks at each wave boundary.
+    const total = def.waves.length;
+    if (total > 0) {
+      ctx.fillStyle = "rgba(0,0,0,0.5)";
+      for (let i = 1; i < total; i++) {
+        const ty = y0 + h - h * (i / total);
+        ctx.fillRect(x, ty - 0.5, w, 1);
+      }
+    }
+  }
+
+  private drawWalls(ctx: CanvasRenderingContext2D): void {
+    if (this.wall.amount < 0.01) return;
+    const x0 = this.boardOriginX;
+    const y0 = this.boardOriginY;
+    const w = this.boardWidth;
+    const h = this.boardHeight;
+    const tints =
+      this.wall.kind === "narrow"
+        ? { fill: "rgba(220, 80, 90, 0.16)", edge: "rgba(255, 130, 140, 0.65)" }
+        : this.wall.kind === "zigzag"
+          ? { fill: "rgba(170, 120, 200, 0.14)", edge: "rgba(220, 170, 255, 0.55)" }
+          : { fill: "rgba(180, 100, 110, 0.12)", edge: "rgba(255, 120, 130, 0.55)" };
+    if (this.wall.kind === "zigzag") {
+      // Trace polygons that follow wallInsetAt(y) along the board height.
+      const STEPS = 24;
+      const leftPts: Array<{ x: number; y: number }> = [];
+      const rightPts: Array<{ x: number; y: number }> = [];
+      for (let i = 0; i <= STEPS; i++) {
+        const y = y0 + (h * i) / STEPS;
+        const inset = this.wallInsetAt(y);
+        leftPts.push({ x: x0 + inset.left, y });
+        rightPts.push({ x: x0 + w - inset.right, y });
+      }
+      ctx.fillStyle = tints.fill;
+      // Left slab
+      ctx.beginPath();
+      ctx.moveTo(x0, y0);
+      for (const p of leftPts) ctx.lineTo(p.x, p.y);
+      ctx.lineTo(x0, y0 + h);
+      ctx.closePath();
+      ctx.fill();
+      // Right slab
+      ctx.beginPath();
+      ctx.moveTo(x0 + w, y0);
+      for (const p of rightPts) ctx.lineTo(p.x, p.y);
+      ctx.lineTo(x0 + w, y0 + h);
+      ctx.closePath();
+      ctx.fill();
+      // Edges
+      ctx.strokeStyle = tints.edge;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      for (let i = 0; i < leftPts.length; i++) {
+        const p = leftPts[i];
+        if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
+      }
+      ctx.stroke();
+      ctx.beginPath();
+      for (let i = 0; i < rightPts.length; i++) {
+        const p = rightPts[i];
+        if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
+      }
+      ctx.stroke();
+      return;
+    }
+    // pinch / narrow: rectangular slabs.
+    const inset = this.wallInsetAt(y0).left;
+    ctx.fillStyle = tints.fill;
+    ctx.fillRect(x0, y0, inset, h);
+    ctx.fillRect(x0 + w - inset, y0, inset, h);
+    ctx.strokeStyle = tints.edge;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(x0 + inset, y0);
+    ctx.lineTo(x0 + inset, y0 + h);
+    ctx.moveTo(x0 + w - inset, y0);
+    ctx.lineTo(x0 + w - inset, y0 + h);
+    ctx.stroke();
+  }
+
+  // Effect-duration helpers. Honor the active challenge's overrides
+  // when set, otherwise fall back to the difficulty-multiplied defaults.
+  private slowDuration(): number {
+    return this.effectOverrides?.slowDuration ?? SLOW_EFFECT_DURATION * this.cfg().effectDurationMul;
+  }
+  private fastDuration(): number {
+    return this.effectOverrides?.fastDuration ?? FAST_EFFECT_DURATION * this.cfg().effectDurationMul;
+  }
+  private shieldDuration(): number {
+    return this.effectOverrides?.shieldDuration ?? SHIELD_DURATION * this.cfg().effectDurationMul;
+  }
+  private droneDuration(): number {
+    return this.effectOverrides?.droneDuration ?? DRONE_DURATION * this.cfg().effectDurationMul;
+  }
+
+  private wallInsetAt(yWorld?: number): { left: number; right: number } {
+    if (this.wall.amount < 0.01) return { left: 0, right: 0 };
+    const halfBoard = this.boardWidth * 0.5;
+    if (this.wall.kind === "pinch") {
+      const inset = this.wall.amount * halfBoard * 0.6;
+      return { left: inset, right: inset };
+    }
+    if (this.wall.kind === "narrow") {
+      const inset = this.wall.amount * halfBoard * 0.85;
+      return { left: inset, right: inset };
+    }
+    if (this.wall.kind === "zigzag") {
+      const baseInset = this.wall.amount * halfBoard * 0.18;
+      const y = yWorld ?? (this.boardOriginY + this.boardHeight * 0.5);
+      const norm = (y - this.boardOriginY) / Math.max(1, this.boardHeight);
+      const ampPx = this.wall.amount * halfBoard * this.wall.amp;
+      const arg = 2 * Math.PI * (norm * 1.5 + this.wall.phase / Math.max(0.1, this.wall.period));
+      const offset = Math.sin(arg) * ampPx;
+      // Mirror left/right so corridor width stays roughly constant.
+      return { left: baseInset + offset, right: baseInset - offset };
+    }
+    return { left: 0, right: 0 };
   }
 
   private shapeColumnFootprint(shape: Shape): { min: number; max: number } {
@@ -2889,10 +3685,16 @@ export class Game {
   }
 
   private pickSpawnColumn(shape: Shape): number | null {
-    // The available columns shrink with the pinch, so spawns stay inside the
+    // The available columns shrink with the wall inset, so spawns stay inside the
     // narrowed area when active.
     const halfFull = Math.floor(BOARD_COLS / 2);
-    const halfActive = Math.max(1, Math.floor(halfFull * (1 - this.pinch * 0.6)));
+    // Approximate the active half-width in "column units" using the inset
+    // at the spawn y (top of board). Pinch and narrow are y-independent;
+    // zigzag varies with y but spawning is at the top so this is fine.
+    const colWidth = SQRT3 * this.hexSize;
+    const insetTop = this.wallInsetAt(this.boardOriginY);
+    const insetCols = Math.max(insetTop.left, insetTop.right) / Math.max(1, colWidth);
+    const halfActive = Math.max(1, Math.floor(halfFull - insetCols));
     const fp = this.shapeColumnFootprint(shape);
     const all: number[] = [];
     for (let c = -halfActive; c <= halfActive; c++) all.push(c);
@@ -2918,15 +3720,18 @@ export class Game {
     this.resumeCountdown = 0;
     playSfx("gameover");
     stopMusic();
-    // Don't bank a new high score for runs that started above 0 — those
-    // are debug "skip-ahead" runs and the score isn't earned cleanly.
-    if (!this.debugRun && this.score > this.best) {
+    if (this.gameMode === "challenge") {
+      // Challenge runs bank into per-challenge best, not the endless leaderboard.
+      this.endChallengeRun();
+    } else if (!this.debugRun && this.score > this.best) {
+      // Don't bank a new high score for runs that started above 0 — those
+      // are debug "skip-ahead" runs and the score isn't earned cleanly.
       this.best = this.score;
       this.saveBestFor(this.difficulty, this.best);
       this.bestEl.textContent = String(this.best);
     }
-    if (!this.debugRun) trackPlayEnd(this.difficulty, this.score);
-    void gcSubmitScore(this.score, this.difficulty);
+    if (this.gameMode === "endless" && !this.debugRun) trackPlayEnd(this.difficulty, this.score);
+    if (this.gameMode === "endless") void gcSubmitScore(this.score, this.difficulty);
     // Scatter the player blob into debris so the wreckage tumbles behind the
     // game-over screen. The player body itself is removed from the world so
     // it doesn't keep being clamped to the rail.
@@ -3149,26 +3954,12 @@ export class Game {
     ctx.fillStyle = "rgba(14, 17, 36, 0.45)";
     ctx.fillRect(this.boardOriginX, this.boardOriginY, this.boardWidth, this.boardHeight);
 
-    // Pinch panels: dim slabs slide in from the sides when the play area is
-    // narrowed during a late-game wave.
-    if (this.pinch > 0.01) {
-      const inset = this.pinch * this.boardWidth * 0.5 * 0.6;
-      ctx.fillStyle = "rgba(180, 100, 110, 0.12)";
-      ctx.fillRect(this.boardOriginX, this.boardOriginY, inset, this.boardHeight);
-      ctx.fillRect(
-        this.boardOriginX + this.boardWidth - inset,
-        this.boardOriginY,
-        inset,
-        this.boardHeight,
-      );
-      ctx.strokeStyle = "rgba(255, 120, 130, 0.55)";
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(this.boardOriginX + inset, this.boardOriginY);
-      ctx.lineTo(this.boardOriginX + inset, this.boardOriginY + this.boardHeight);
-      ctx.moveTo(this.boardOriginX + this.boardWidth - inset, this.boardOriginY);
-      ctx.lineTo(this.boardOriginX + this.boardWidth - inset, this.boardOriginY + this.boardHeight);
-      ctx.stroke();
+    // Wall panels: dim slabs slide in from the sides while a wall is active.
+    this.drawWalls(ctx);
+
+    // Challenge progress bar (left edge, fills bottom-up).
+    if (this.gameMode === "challenge" && this.activeChallenge && (this.state === "playing" || this.state === "paused")) {
+      this.drawChallengeProgress(ctx);
     }
 
     // Bottom rail line where the player sits.
