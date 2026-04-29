@@ -1207,11 +1207,19 @@ export class Game {
 
   private quitToMenu(): void {
     if (this.state !== "paused") return;
+    const wasChallenge = this.gameMode === "challenge";
     this.resetRunState(0);
-    this.state = "menu";
-    this.renderMenu();
+    this.gameMode = "endless";
+    this.activeChallenge = null;
+    this.effectOverrides = null;
     this.setSliderEnabled(true);
     stopMusic();
+    if (wasChallenge) {
+      this.openChallengeSelect();
+    } else {
+      this.state = "menu";
+      this.renderMenu();
+    }
   }
 
   // Tear-down + reset of every per-run field. Shared by startOrRestart
@@ -1255,6 +1263,17 @@ export class Game {
     this.rotateTutorialStartAngle = 0;
     this.fastLevel = 0;
     this.fastBonus = 0;
+    this.progress = 0;
+    this.progressDisplayed = 0;
+    this.waveBumpT = 0;
+    this.challengeWaveIdx = 0;
+    this.challengeSlotIdx = 0;
+    this.challengeProbCount = 0;
+    this.challengeWaveTimer = 0;
+    this.challengeSlotTimer = 0;
+    this.challengeSpawnTimer = 0;
+    this.challengeFinishingHold = 0;
+    this.currentParsedWave = null;
     this.wall.kind = "none";
     this.wall.amount = 0;
     this.wall.amountTarget = 0;
@@ -3086,7 +3105,7 @@ export class Game {
     } else if (parsed.walls === "narrow") {
       this.setWall("narrow", 1.0);
     } else {
-      this.setWall("pinch", 0.6);
+      this.setWall("pinch", 1.0);
     }
 
     // Pick a safe column (or skip enforcement) for the prob stream.
@@ -3169,8 +3188,8 @@ export class Game {
   private spawnFromSlot(slot: { size: number; col: number; angleIdx: number }, wave: ParsedWave): void {
     const sizeRaw = Math.max(1, Math.min(5, slot.size));
     let size = sizeRaw;
-    // Narrow walls can't fit size-5 polyhexes through the corridor; clamp.
-    if (wave.walls === "narrow" && size >= 5) size = 3;
+    // Narrow walls can't fit size-4+ polyhexes through the corridor; clamp.
+    if (wave.walls === "narrow" && size >= 4) size = 3;
     const shape = buildPolyhexShape(size, Math.random);
 
     const angle = ANGLE_TABLE[Math.max(0, Math.min(9, slot.angleIdx))] as {
@@ -3188,7 +3207,10 @@ export class Game {
     const railLeft = this.currentRailLeft();
     const railRight = this.currentRailRight();
     const railCenter = (railLeft + railRight) / 2;
-    const speed = this.computeFallSpeed() * wave.baseSpeedMul;
+    // Challenge mode uses a clean base (no score ramp, no wave-phase
+    // variance) so each `speed=` token in the DSL means exactly what
+    // the designer wrote.
+    const speed = Math.min(MAX_FALL_SPEED, BASE_FALL_SPEED * wave.baseSpeedMul);
 
     let x: number;
     let y: number;
@@ -3243,7 +3265,7 @@ export class Game {
       shape = COIN_SHAPE;
     } else {
       const sz = wave.sizeMin + Math.floor(Math.random() * (wave.sizeMax - wave.sizeMin + 1));
-      const sizeClamped = wave.walls === "narrow" && sz >= 5 ? 3 : sz;
+      const sizeClamped = wave.walls === "narrow" && sz >= 4 ? 3 : sz;
       shape = buildPolyhexShape(Math.max(1, Math.min(5, sizeClamped)), Math.random);
     }
 
@@ -3256,7 +3278,10 @@ export class Game {
     const colWidth = SQRT3 * this.hexSize;
     const x = railCenter + colStep * colWidth;
     const y = this.boardOriginY - this.hexSize * 4;
-    const speed = this.computeFallSpeed() * wave.baseSpeedMul;
+    // Challenge mode uses a clean base (no score ramp, no wave-phase
+    // variance) so each `speed=` token in the DSL means exactly what
+    // the designer wrote.
+    const speed = Math.min(MAX_FALL_SPEED, BASE_FALL_SPEED * wave.baseSpeedMul);
     const tilt = wave.defaultDir;
     const vx = Math.sin(tilt) * speed;
     const vy = Math.cos(tilt) * speed;
@@ -3529,7 +3554,7 @@ export class Game {
     } else if (this.score >= 800 && r < 0.40) {
       this.setWall("zigzag", 1.0);
     } else if (this.score >= this.cfg().narrowingScore && r < 0.50) {
-      this.setWall("pinch", 0.6);
+      this.setWall("pinch", 1.0);
     } else {
       this.setWall("none", 0);
     }
@@ -3542,25 +3567,44 @@ export class Game {
   private drawChallengeProgress(ctx: CanvasRenderingContext2D): void {
     const def = this.activeChallenge;
     if (!def) return;
-    const baseW = 6;
-    const w = baseW + (this.waveBumpT > 0 ? 4 * this.waveBumpT * 5 : 0);
-    const x = this.boardOriginX - baseW - 4;
+    const baseW = 8;
+    const w = baseW + (this.waveBumpT > 0 ? 6 * this.waveBumpT * 5 : 0);
+    // Prefer just outside the board's left edge; if there isn't room
+    // (mobile portrait usually has boardOriginX small), tuck the bar
+    // inside the canvas at its left margin instead.
+    const desiredX = this.boardOriginX - baseW - 4;
+    const x = desiredX < 2 ? 2 : desiredX;
     const y0 = this.boardOriginY;
     const h = this.boardHeight;
-    ctx.fillStyle = "rgba(255,255,255,0.07)";
+    // Track
+    ctx.fillStyle = "rgba(255,255,255,0.12)";
     ctx.fillRect(x, y0, w, h);
+    ctx.strokeStyle = "rgba(127, 232, 156, 0.55)";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x + 0.5, y0 + 0.5, w - 1, h - 1);
+    // Fill
     const fill = h * Math.min(1, Math.max(0, this.progressDisplayed));
-    ctx.fillStyle = "#7fe89c";
+    const grad = ctx.createLinearGradient(x, y0 + h - fill, x, y0 + h);
+    grad.addColorStop(0, "#a4ffc3");
+    grad.addColorStop(1, "#3fc873");
+    ctx.fillStyle = grad;
     ctx.fillRect(x, y0 + h - fill, w, fill);
-    // Tick marks at each wave boundary.
+    // Tick marks
     const total = def.waves.length;
     if (total > 0) {
-      ctx.fillStyle = "rgba(0,0,0,0.5)";
+      ctx.fillStyle = "rgba(0,0,0,0.55)";
       for (let i = 1; i < total; i++) {
         const ty = y0 + h - h * (i / total);
         ctx.fillRect(x, ty - 0.5, w, 1);
       }
     }
+    // Percent label centred at top of the bar.
+    const pct = Math.round(this.progressDisplayed * 100);
+    ctx.fillStyle = "rgba(232, 236, 255, 0.85)";
+    ctx.font = "bold 10px -apple-system, system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "alphabetic";
+    ctx.fillText(`${pct}%`, x + w / 2, y0 - 4);
   }
 
   private drawWalls(ctx: CanvasRenderingContext2D): void {
@@ -3652,7 +3696,10 @@ export class Game {
     if (this.wall.amount < 0.01) return { left: 0, right: 0 };
     const halfBoard = this.boardWidth * 0.5;
     if (this.wall.kind === "pinch") {
-      const inset = this.wall.amount * halfBoard * 0.6;
+      // Effective inset = 0.6 * halfBoard at amount=1, matching the
+      // legacy 0.35 inset that the original pinch used at its 0.35
+      // scalar. Wall amount is now uniformly 0..1 across kinds.
+      const inset = this.wall.amount * halfBoard * 0.36;
       return { left: inset, right: inset };
     }
     if (this.wall.kind === "narrow") {

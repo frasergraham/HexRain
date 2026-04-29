@@ -405,13 +405,15 @@ export function validateChallenge(def: ChallengeDefLike): string[] {
     }
     const hasCount = parsed.countCap !== null && parsed.countCap > 0;
     const hasSlots = parsed.slots.length > 0;
+    const probDisabledByZeroCount = parsed.countCap === 0;
     const hasDur =
       parsed.durOverride !== null &&
       parsed.durOverride > 0 &&
-      parsed.spawnInterval > 0;
+      parsed.spawnInterval > 0 &&
+      !probDisabledByZeroCount; // dur with count=0 and no slots = silent wave
     if (!hasCount && !hasSlots && !hasDur) {
       errors.push(
-        `wave[${i}]: wave does nothing (need count>0, slots, or dur+rate)`,
+        `wave[${i}]: wave does nothing (need count>0, slots, or dur+rate without count=0)`,
       );
     }
   }
