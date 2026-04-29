@@ -1376,9 +1376,9 @@ export class Game {
         </div>
         <h1 class="unlock-shop-title">UNLOCK EVERYTHING</h1>
         <ul class="unlock-shop-list">
-          <li><span class="unlock-shop-bullet">★</span> Open every challenge in all 6 blocks immediately</li>
-          <li><span class="unlock-shop-bullet">★</span> Unlock <strong>PAINFUL</strong> difficulty</li>
-          <li><span class="unlock-shop-bullet">★</span> One-time purchase, restores across devices</li>
+          <li><span class="unlock-shop-bullet">★</span><span>Open every challenge in all 6 blocks immediately</span></li>
+          <li><span class="unlock-shop-bullet">★</span><span>Unlock <strong>PAINFUL</strong> difficulty</span></li>
+          <li><span class="unlock-shop-bullet">★</span><span>One-time purchase, restores across devices</span></li>
         </ul>
         <div class="unlock-shop-actions">
           ${buyHtml}
