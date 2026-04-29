@@ -20,6 +20,16 @@ The site is published from `docs/` on `main` to
 Add `?debug=1` to the URL for **DEBUG buttons** on the menu that start a
 fresh run at 199 / 399 / 599. Runs started this way don't bank a high score.
 
+Challenge blocks can be unlocked organically (complete 3 of 5 in block N to
+unlock block N+1) or, on iOS only, via a single non-consumable in-app
+purchase **`com.hexrain.app.unlockall`** ("Unlock All Challenges") wired
+through `src/storeKit.ts` ↔ `ios/App/CapApp-SPM/Sources/CapApp-SPM/StoreKitPlugin.swift`.
+The flag is persisted as `purchasedUnlock` on `ChallengeProgress`
+(`localStorage["hexrain.challenges.v1"]`) and short-circuits the
+3-of-5 gate in `recomputeUnlocked`. For local testing, add
+`ios/App/App/Configuration.storekit` to the Xcode scheme (Run →
+StoreKit Configuration).
+
 ## Module layout (`src/`)
 
 | File | Purpose |
@@ -33,6 +43,7 @@ fresh run at 199 / 399 / 599. Runs started this way don't bank a high score.
 | `input.ts` | Keyboard, slider, slide-to-rotate, button bindings |
 | `types.ts` | `ClusterKind`, `GameState`, etc. |
 | `style.css` | Layout, HUD, touch controls |
+| `storeKit.ts` | iOS-only StoreKit 2 bridge for the "Unlock All Challenges" IAP |
 
 ## Game loop & state
 

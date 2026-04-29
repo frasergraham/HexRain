@@ -21,6 +21,8 @@ export interface ChallengeProgress {
   stars: Record<string, number>;
   completed: string[];
   unlockedBlocks: number[];
+  /** Set true when the player owns the iOS "Unlock All Challenges" IAP. */
+  purchasedUnlock: boolean;
 }
 
 export interface ChallengeStarThresholds {
@@ -50,6 +52,7 @@ const EMPTY_PROGRESS: ChallengeProgress = {
   stars: {},
   completed: [],
   unlockedBlocks: [1],
+  purchasedUnlock: false,
 };
 
 // CHALLENGES roster. Filled in by hand/generated content; validated at
@@ -696,13 +699,15 @@ export function loadChallengeProgress(): ChallengeProgress {
       .map(([id, n]) => [id, Math.max(0, Math.min(3, Math.round(Number(n) || 0)))] as const);
     const completed = (parsed.completed ?? []).filter((id) => validIds.has(id));
     const unique = Array.from(new Set(completed)).sort();
+    const purchasedUnlock = parsed.purchasedUnlock === true;
     return {
       v: 1,
       best: Object.fromEntries(bestEntries),
       bestPct: Object.fromEntries(bestPctEntries),
       stars: Object.fromEntries(starsEntries),
       completed: unique,
-      unlockedBlocks: recomputeUnlocked(new Set(unique)),
+      unlockedBlocks: recomputeUnlocked(new Set(unique), purchasedUnlock),
+      purchasedUnlock,
     };
   } catch {
     return { ...EMPTY_PROGRESS };
@@ -745,14 +750,30 @@ export function saveChallengeCompletion(id: string, score: number, stars: number
     bestPct: { ...p.bestPct, [id]: 100 },
     stars: { ...p.stars, [id]: newStars },
     completed: Array.from(completed).sort(),
-    unlockedBlocks: recomputeUnlocked(completed),
+    unlockedBlocks: recomputeUnlocked(completed, p.purchasedUnlock),
+    purchasedUnlock: p.purchasedUnlock,
   };
   save(next);
   return next;
 }
 
-function recomputeUnlocked(completed: Set<string>): number[] {
-  if (DEBUG_MODE) return [...ALL_BLOCKS];
+// Flip the IAP-unlock flag. Idempotent — no-op when already in the desired
+// state. Recomputes unlockedBlocks so the toggled flag takes effect on the
+// next read.
+export function setPurchasedUnlock(v: boolean): ChallengeProgress {
+  const p = loadChallengeProgress();
+  if (p.purchasedUnlock === v) return p;
+  const next: ChallengeProgress = {
+    ...p,
+    purchasedUnlock: v,
+    unlockedBlocks: recomputeUnlocked(new Set(p.completed), v),
+  };
+  save(next);
+  return next;
+}
+
+function recomputeUnlocked(completed: Set<string>, purchasedUnlock = false): number[] {
+  if (DEBUG_MODE || purchasedUnlock) return [...ALL_BLOCKS];
   const out = [1];
   for (let b = 1; b < 6; b++) {
     let inBlock = 0;

@@ -1,17 +1,19 @@
 import { Capacitor, registerPlugin } from "@capacitor/core";
 
-export type LeaderboardDifficulty = "easy" | "medium" | "hard";
+export type LeaderboardDifficulty = "easy" | "medium" | "hard" | "hardcore";
 
 export const LEADERBOARDS: Record<LeaderboardDifficulty, string> = {
   easy: "hex_rain.high_score.easy",
   medium: "hex_rain.high_score.medium",
   hard: "hex_rain.high_score.hard",
+  hardcore: "hex_rain.high_score.hardcore",
 };
 
 export const LEADERBOARD_TITLES: Record<LeaderboardDifficulty, string> = {
   easy: "High Score · Easy",
   medium: "High Score · Medium",
   hard: "High Score · Hard",
+  hardcore: "High Score · Painful",
 };
 
 export const ACHIEVEMENTS = {

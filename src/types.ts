@@ -18,11 +18,12 @@ export type GameState =
   | "playing"
   | "paused"
   | "gameover"
-  | "challengeComplete";
+  | "challengeComplete"
+  | "unlockShop";
 
 export type GameMode = "endless" | "challenge";
 
-export type Difficulty = "easy" | "medium" | "hard";
+export type Difficulty = "easy" | "medium" | "hard" | "hardcore";
 
 export type WallKind = "none" | "pinch" | "zigzag" | "narrow";
 

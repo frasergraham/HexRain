@@ -44,8 +44,17 @@ import {
   loadChallengeProgress,
   saveChallengeBest,
   saveChallengeCompletion,
+  setPurchasedUnlock,
   type ChallengeDef,
 } from "./challenges";
+import {
+  getUnlockAllProduct,
+  isStoreKitAvailable,
+  onUnlockAllEntitlementChanged,
+  purchaseUnlockAll,
+  restoreUnlockAll,
+  type ProductInfo,
+} from "./storeKit";
 
 // Score-club achievements are difficulty-gated: easy earns none, medium
 // earns the standard ladder, and hard earns the Elite ladder. The
@@ -70,6 +79,9 @@ const SCORE_MILESTONES_BY_DIFFICULTY: Record<Difficulty, ReadonlyArray<Milestone
     { threshold: 1000, id: ACHIEVEMENTS.eliteScore1000 },
     { threshold: 1500, id: ACHIEVEMENTS.eliteScore1500 },
   ],
+  // No score-club achievements on hardcore yet — the difficulty itself
+  // is the prize, and the leaderboard ranks players within it.
+  hardcore: [],
 };
 
 // Fast-bonus payout tiers, awarded when awardFastBonus banks the pool.
@@ -86,7 +98,10 @@ const BOARD_COLS = 9;
 // Difficulty knobs. Multipliers stack on top of the medium baseline:
 // fall speed (initial cluster velocity), spawn interval (how often
 // clusters arrive — bigger = slower), per-kind helpful spawn chances,
-// and timed-effect duration for shield / drone / slow.
+// and timed-effect duration. `effectDurationMul` is the default for
+// every timed effect; per-effect overrides (slow/fast/shield/drone)
+// take precedence so hardcore can stretch fast while shrinking shields
+// and drones independently.
 interface DifficultyConfig {
   fallSpeedMul: number;
   spawnIntervalMul: number;
@@ -95,8 +110,15 @@ interface DifficultyConfig {
   shieldMul: number;
   droneMul: number;
   effectDurationMul: number;
+  slowDurationMul?: number;
+  fastDurationMul?: number;
+  shieldDurationMul?: number;
+  droneDurationMul?: number;
   // Score at which the inward narrowing wave variant unlocks.
   narrowingScore: number;
+  // Player size at which the danger glow appears and a blue hit becomes
+  // lethal. Default 7; hardcore drops it to 3.
+  dangerSize: number;
 }
 
 const DIFFICULTY_CONFIG: Record<Difficulty, DifficultyConfig> = {
@@ -109,6 +131,7 @@ const DIFFICULTY_CONFIG: Record<Difficulty, DifficultyConfig> = {
     droneMul: 1.5,
     effectDurationMul: 1.2,
     narrowingScore: 600,
+    dangerSize: 7,
   },
   medium: {
     fallSpeedMul: 1.0,
@@ -119,6 +142,7 @@ const DIFFICULTY_CONFIG: Record<Difficulty, DifficultyConfig> = {
     droneMul: 1.0,
     effectDurationMul: 1.0,
     narrowingScore: 600,
+    dangerSize: 7,
   },
   hard: {
     fallSpeedMul: 1.35,
@@ -129,12 +153,33 @@ const DIFFICULTY_CONFIG: Record<Difficulty, DifficultyConfig> = {
     droneMul: 0.6,
     effectDurationMul: 0.8,
     narrowingScore: 200,
+    dangerSize: 7,
+  },
+  hardcore: {
+    fallSpeedMul: 1.5,
+    spawnIntervalMul: 0.75,
+    stickyMul: 0.5,
+    // No slow blocks at all in hardcore.
+    slowMul: 0,
+    shieldMul: 0.4,
+    droneMul: 0.4,
+    effectDurationMul: 1.0,
+    fastDurationMul: 2.0,
+    shieldDurationMul: 0.5,
+    droneDurationMul: 0.5,
+    narrowingScore: 100,
+    dangerSize: 3,
   },
 };
 
 const DIFFICULTY_STORAGE_KEY = "hexrain.difficulty";
 const DIFFICULTY_DEFAULT: Difficulty = "medium";
 const HIGH_SCORE_KEY_PREFIX = "hexrain.highScore.";
+
+// Hardcore difficulty: locked by default. Unlocks organically when the
+// player scores HARDCORE_UNLOCK_SCORE on hard, or via the unlock-all IAP.
+const HARDCORE_UNLOCK_KEY = "hexrain.hardcoreUnlocked";
+const HARDCORE_UNLOCK_SCORE = 1000;
 const LEGACY_HIGH_SCORE_KEY = "hexrain.highScore";
 // Per-kind first-appearance hint labels (AVOID/HEAL/etc.) and the
 // rotate tutorial fire once per player, not once per session.
@@ -169,7 +214,6 @@ const SPAWN_INTERVAL_START = 1.6; // seconds
 const SPAWN_INTERVAL_MIN = 0.7;
 const SPAWN_INTERVAL_RAMP = 0.03;
 
-const DANGER_SIZE = 7;
 const LOSE_COMBO = 2;
 const STICK_INVULN_MS = 180;
 
@@ -712,6 +756,10 @@ export class Game {
       if (btn) {
         playSfx("click");
         const value = btn.dataset.difficulty as Difficulty | undefined;
+        if (value === "hardcore" && !this.isHardcoreUnlocked()) {
+          this.openUnlockShop();
+          return;
+        }
         if (value) this.setDifficulty(value);
         return;
       }
@@ -788,6 +836,34 @@ export class Game {
         this.openChallengeSelect();
         return;
       }
+      // Gateway button — opens the unlock-everything screen (used both
+      // by the challenge-select banner and by the locked HARDCORE button).
+      const openShopBtn = target?.closest('button[data-action="open-unlock-shop"]') as HTMLButtonElement | null;
+      if (openShopBtn) {
+        playSfx("click");
+        this.openUnlockShop();
+        return;
+      }
+      // Back from the unlock-everything screen.
+      const unlockBackBtn = target?.closest('button[data-action="unlock-shop-back"]') as HTMLButtonElement | null;
+      if (unlockBackBtn) {
+        playSfx("click");
+        this.closeUnlockShop();
+        return;
+      }
+      // Buy / restore on the unlock-everything screen.
+      const iapBuyBtn = target?.closest('button[data-action="iap-unlock"]') as HTMLButtonElement | null;
+      if (iapBuyBtn) {
+        playSfx("click");
+        void this.handleIapPurchase(iapBuyBtn);
+        return;
+      }
+      const iapRestoreBtn = target?.closest('button[data-action="iap-restore"]') as HTMLButtonElement | null;
+      if (iapRestoreBtn) {
+        playSfx("click");
+        void this.handleIapRestore(iapRestoreBtn);
+        return;
+      }
       // Challenge card pick.
       const challengeCard = target?.closest('button[data-challenge-id]') as HTMLButtonElement | null;
       if (challengeCard) {
@@ -857,6 +933,16 @@ export class Game {
 
     this.debugEnabled =
       new URLSearchParams(window.location.search).get("debug") === "1";
+
+    // StoreKit listener: a transaction completing outside an active call
+    // (e.g. Apple Pay sheet finishing after a backgrounding, a refund, a
+    // purchase made on another device) should toggle the unlock flag and
+    // refresh the challenge select if it's currently visible.
+    onUnlockAllEntitlementChanged((owned) => {
+      if (!owned) return;
+      setPurchasedUnlock(true);
+      if (this.state === "challengeSelect") this.renderChallengeSelect();
+    });
 
     this.renderMenu();
 
@@ -1069,6 +1155,15 @@ export class Game {
   // PLAY AGAIN button on game-over can resume from the same score.
   private debugStartScore = 0;
 
+  // Cached IAP product info — fetched once on the first challenge-select
+  // open and reused so the localized price is available immediately on
+  // subsequent renders. Null until resolved or on web.
+  private unlockProduct: ProductInfo | null = null;
+  // Where to navigate back to from the unlock-everything screen — set
+  // when openUnlockShop() runs so the Back button returns to the right
+  // surface (menu vs challenge select).
+  private unlockShopReturnState: GameState = "menu";
+
   // Achievement gate: in ?debug=1 mode no achievements get reported, so
   // experimenting with high-score test runs doesn't dirty Game Center
   // / localStorage achievement state.
@@ -1145,6 +1240,138 @@ export class Game {
 
   // ----- Challenge UI ---------------------------------------------------
 
+  private async handleIapPurchase(btn: HTMLButtonElement): Promise<void> {
+    const original = btn.innerHTML;
+    btn.disabled = true;
+    btn.classList.add("loading");
+    try {
+      const state = await purchaseUnlockAll();
+      if (state === "purchased") {
+        setPurchasedUnlock(true);
+        this.refreshAfterUnlockChange();
+        return;
+      }
+      if (state === "pending") {
+        // Apple is waiting on something (Ask-to-Buy, etc). The
+        // entitlement listener will fire once it clears.
+        this.flashIapMessage(btn, "Pending…");
+      } else if (state === "failed") {
+        this.flashIapMessage(btn, "Try again");
+      }
+      // "cancelled" → silent return; user knows what they did.
+    } finally {
+      if (btn.isConnected) {
+        btn.innerHTML = original;
+        btn.disabled = false;
+        btn.classList.remove("loading");
+      }
+    }
+  }
+
+  private async handleIapRestore(btn: HTMLButtonElement): Promise<void> {
+    btn.disabled = true;
+    try {
+      const owned = await restoreUnlockAll();
+      if (owned) {
+        setPurchasedUnlock(true);
+        this.refreshAfterUnlockChange();
+      } else {
+        this.flashIapMessage(btn, "Nothing to restore");
+      }
+    } finally {
+      if (btn.isConnected) btn.disabled = false;
+    }
+  }
+
+  // The IAP also unlocks hardcore. After a successful purchase or
+  // restore we re-render whichever screen the player is on so the
+  // freshly-unlocked content shows up without a navigation round-trip.
+  private refreshAfterUnlockChange(): void {
+    if (this.state === "unlockShop") {
+      this.closeUnlockShop();
+      return;
+    }
+    if (this.state === "challengeSelect") {
+      this.renderChallengeSelect();
+      return;
+    }
+    if (this.state === "menu") {
+      this.refreshDifficultyButtons();
+    }
+  }
+
+  // Briefly replace the button label with a status string, then revert.
+  // Pure UI sugar — no state changes.
+  private flashIapMessage(btn: HTMLButtonElement, msg: string): void {
+    const original = btn.textContent ?? "";
+    btn.textContent = msg;
+    window.setTimeout(() => {
+      if (btn.isConnected) btn.textContent = original;
+    }, 1500);
+  }
+
+  // Unlock-everything screen. Bundles the IAP description (all
+  // challenges + hardcore difficulty) with buy + restore buttons, and
+  // routes Back to the surface the user came from.
+  private openUnlockShop(): void {
+    this.unlockShopReturnState = this.state === "challengeSelect" ? "challengeSelect" : "menu";
+    this.state = "unlockShop";
+    this.setScoreVisible(false);
+    this.setPauseButtonVisible(false);
+    this.setHudVisible(false);
+    this.renderUnlockShop();
+    this.overlay.classList.remove("hidden");
+    if (isStoreKitAvailable() && !this.unlockProduct) {
+      void getUnlockAllProduct().then((p) => {
+        if (!p) return;
+        this.unlockProduct = p;
+        if (this.state === "unlockShop") this.renderUnlockShop();
+      });
+    }
+  }
+
+  private closeUnlockShop(): void {
+    if (this.unlockShopReturnState === "challengeSelect") {
+      this.openChallengeSelect();
+    } else {
+      this.state = "menu";
+      this.renderMenu();
+    }
+  }
+
+  private renderUnlockShop(): void {
+    const price = this.unlockProduct?.displayPrice;
+    const priceLine = price ? `<span class="unlock-shop-price">${escapeHtml(price)}</span>` : "";
+    const buyHtml = `
+        <button type="button" class="play-btn unlock-shop-buy" data-action="iap-unlock">
+          <span>BUY</span>
+          ${priceLine}
+        </button>
+        <button type="button" class="challenge-back" data-action="iap-restore">Restore previous purchase</button>
+      `;
+    this.overlay.innerHTML = `
+      <div class="unlock-shop">
+        <div class="challenge-select-top">
+          <button type="button" class="challenge-back" data-action="unlock-shop-back">← Back</button>
+          <span style="font-size:13px; letter-spacing:0.18em; text-transform:uppercase; color:#aab4dc;">Unlock everything</span>
+          <span style="width:60px"></span>
+        </div>
+        <h1 class="unlock-shop-title">UNLOCK EVERYTHING</h1>
+        <ul class="unlock-shop-list">
+          <li><span class="unlock-shop-bullet">★</span> Open every challenge in all 6 blocks immediately</li>
+          <li><span class="unlock-shop-bullet">★</span> Unlock <strong>PAINFUL</strong> difficulty</li>
+          <li><span class="unlock-shop-bullet">★</span> One-time purchase, restores across devices</li>
+        </ul>
+        <div class="unlock-shop-actions">
+          ${buyHtml}
+        </div>
+        <p class="unlock-shop-organic">
+          Or earn it the long way: complete 3 of 5 challenges in a block to unlock the next, and score ${HARDCORE_UNLOCK_SCORE} on Hard to unlock Painful mode.
+        </p>
+      </div>
+    `;
+  }
+
   private openChallengeSelect(): void {
     this.state = "challengeSelect";
     this.setScoreVisible(false);
@@ -1152,6 +1379,16 @@ export class Game {
     this.setHudVisible(false);
     this.renderChallengeSelect();
     this.overlay.classList.remove("hidden");
+    // Kick off the StoreKit product fetch the first time the player visits
+    // the challenge select. Once it resolves, re-render so the price slot
+    // in the IAP banner shows the localized cost instead of the placeholder.
+    if (isStoreKitAvailable() && !this.unlockProduct) {
+      void getUnlockAllProduct().then((p) => {
+        if (!p) return;
+        this.unlockProduct = p;
+        if (this.state === "challengeSelect") this.renderChallengeSelect();
+      });
+    }
   }
 
   private openChallengeIntro(def: ChallengeDef): void {
@@ -1247,6 +1484,22 @@ export class Game {
         </section>
       `;
     }).join("");
+    // IAP banner: shown on every platform when not already purchased.
+    // The web build doesn't actually ship to users — keeping the banner
+    // visible there makes layout/copy review easier without round-
+    // tripping through a TestFlight build.
+    const showIapBanner = !progress.purchasedUnlock;
+    const priceLabel = this.unlockProduct?.displayPrice;
+    const iapHtml = showIapBanner
+      ? `
+        <div class="iap-banner">
+          <button type="button" class="iap-buy" data-action="open-unlock-shop">
+            <span class="iap-title">Unlock All Challenges</span>
+            ${priceLabel ? `<span class="iap-price">${escapeHtml(priceLabel)}</span>` : ""}
+          </button>
+        </div>
+      `
+      : "";
     this.overlay.innerHTML = `
       <div class="challenge-select">
         <div class="challenge-select-top">
@@ -1254,6 +1507,7 @@ export class Game {
           <span style="font-size:13px; letter-spacing:0.18em; text-transform:uppercase; color:#aab4dc;">Challenges</span>
           <span style="width:60px"></span>
         </div>
+        ${iapHtml}
         ${blockHtml}
       </div>
     `;
@@ -1504,6 +1758,7 @@ export class Game {
         <button type="button" data-difficulty="easy">EASY</button>
         <button type="button" data-difficulty="medium">MEDIUM</button>
         <button type="button" data-difficulty="hard">HARD</button>
+        <button type="button" data-difficulty="hardcore">PAINFUL</button>
       </div>
     `;
   }
@@ -1762,10 +2017,11 @@ export class Game {
     this.applyMovementInput(effectiveScale);
 
     const playerSize = this.player.size();
-    this.player.inDanger = playerSize >= DANGER_SIZE;
+    const dangerSize = this.cfg().dangerSize;
+    this.player.inDanger = playerSize >= dangerSize;
 
     // Survivor: was in danger and clawed back to a single hex.
-    if (playerSize >= DANGER_SIZE) this.wasInDangerThisRun = true;
+    if (playerSize >= dangerSize) this.wasInDangerThisRun = true;
     if (this.wasInDangerThisRun && playerSize === 1) {
       this.awardAchievement(ACHIEVEMENTS.survivor);
       this.wasInDangerThisRun = false;
@@ -2671,7 +2927,7 @@ export class Game {
     // Snapshot pre-hit size so the lose check only counts hits taken while
     // already in the danger zone. Otherwise a fast 5→6→7 combo would end
     // the run before the danger glow ever appears.
-    const wasInDanger = this.player.size() >= DANGER_SIZE;
+    const wasInDanger = this.player.size() >= this.cfg().dangerSize;
 
     // Bigger blocks bite harder, but a notch gentler than sticky removes:
     // 1–3 hex clusters stick 1, 4 sticks 2, 5 sticks 3 (max(1, N-2)). Each
@@ -3726,7 +3982,13 @@ export class Game {
 
   private loadDifficulty(): Difficulty {
     const v = localStorage.getItem(DIFFICULTY_STORAGE_KEY);
-    if (v === "easy" || v === "medium" || v === "hard") return v;
+    if (v === "easy" || v === "medium" || v === "hard" || v === "hardcore") {
+      // Defensive: drop hardcore back to medium if the player loaded it
+      // last session and has since lost the unlock (e.g. a new install
+      // syncing localStorage from a cloud backup).
+      if (v === "hardcore" && !this.isHardcoreUnlocked()) return DIFFICULTY_DEFAULT;
+      return v;
+    }
     return DIFFICULTY_DEFAULT;
   }
 
@@ -3736,6 +3998,37 @@ export class Game {
 
   private saveBestFor(d: Difficulty, best: number): void {
     localStorage.setItem(HIGH_SCORE_KEY_PREFIX + d, String(best));
+  }
+
+  // Hardcore mode is locked until the player either scores HARDCORE_THRESHOLD
+  // on hard or buys the unlock-everything IAP. We snapshot the org-unlock
+  // path in localStorage so it survives across runs without a re-derivation.
+  private isHardcoreUnlocked(): boolean {
+    if (localStorage.getItem(HARDCORE_UNLOCK_KEY) === "1") return true;
+    return loadChallengeProgress().purchasedUnlock;
+  }
+
+  private grantHardcoreUnlock(): void {
+    if (localStorage.getItem(HARDCORE_UNLOCK_KEY) === "1") return;
+    localStorage.setItem(HARDCORE_UNLOCK_KEY, "1");
+  }
+
+  // Called from the score-update path during a hard run. Cheap — just a
+  // string compare + threshold check until the unlock fires once.
+  private maybeUnlockHardcore(): void {
+    if (this.debugEnabled) return; // debug runs don't dirty real unlock state
+    if (this.difficulty !== "hard") return;
+    if (this.score < HARDCORE_UNLOCK_SCORE) return;
+    if (localStorage.getItem(HARDCORE_UNLOCK_KEY) === "1") return;
+    this.grantHardcoreUnlock();
+    // Floater so the moment is visible mid-run.
+    this.spawnFloater(
+      "PAINFUL UNLOCKED",
+      this.boardOriginX + this.boardWidth / 2,
+      this.boardOriginY + this.boardHeight * 0.35,
+      "#ff7a4a",
+      "rgba(255, 140, 80, 0.95)",
+    );
   }
 
   // The active difficulty's tunable bundle.
@@ -3759,10 +4052,16 @@ export class Game {
   private refreshDifficultyButtons(): void {
     const host = document.getElementById("difficultyButtons");
     if (!host) return;
+    const hardcoreUnlocked = this.isHardcoreUnlocked();
     for (const btn of Array.from(host.querySelectorAll<HTMLButtonElement>("button[data-difficulty]"))) {
       const value = btn.dataset.difficulty as Difficulty | undefined;
       btn.classList.toggle("active", value === this.difficulty);
       btn.setAttribute("aria-pressed", value === this.difficulty ? "true" : "false");
+      // Locked HARDCORE button: visually distinct + clickthrough routes
+      // to the unlock-everything screen instead of selecting the difficulty.
+      const locked = value === "hardcore" && !hardcoreUnlocked;
+      btn.classList.toggle("locked", locked);
+      btn.setAttribute("aria-disabled", locked ? "true" : "false");
     }
   }
 
@@ -4011,17 +4310,24 @@ export class Game {
 
   // Effect-duration helpers. Honor the active challenge's overrides
   // when set, otherwise fall back to the difficulty-multiplied defaults.
+  // Per-effect duration multipliers (slow/fast/shield/drone) override
+  // the global effectDurationMul when present — used by hardcore to
+  // stretch fast while shrinking shields and drones.
   private slowDuration(): number {
-    return this.effectOverrides?.slowDuration ?? SLOW_EFFECT_DURATION * this.cfg().effectDurationMul;
+    const c = this.cfg();
+    return this.effectOverrides?.slowDuration ?? SLOW_EFFECT_DURATION * (c.slowDurationMul ?? c.effectDurationMul);
   }
   private fastDuration(): number {
-    return this.effectOverrides?.fastDuration ?? FAST_EFFECT_DURATION * this.cfg().effectDurationMul;
+    const c = this.cfg();
+    return this.effectOverrides?.fastDuration ?? FAST_EFFECT_DURATION * (c.fastDurationMul ?? c.effectDurationMul);
   }
   private shieldDuration(): number {
-    return this.effectOverrides?.shieldDuration ?? SHIELD_DURATION * this.cfg().effectDurationMul;
+    const c = this.cfg();
+    return this.effectOverrides?.shieldDuration ?? SHIELD_DURATION * (c.shieldDurationMul ?? c.effectDurationMul);
   }
   private droneDuration(): number {
-    return this.effectOverrides?.droneDuration ?? DRONE_DURATION * this.cfg().effectDurationMul;
+    const c = this.cfg();
+    return this.effectOverrides?.droneDuration ?? DRONE_DURATION * (c.droneDurationMul ?? c.effectDurationMul);
   }
 
   private wallInsetAt(yWorld?: number): { left: number; right: number } {
@@ -4175,6 +4481,9 @@ export class Game {
       this.awardAchievement(m.id);
       this.nextMilestoneIdx += 1;
     }
+    // Hardcore organic unlock: scoring HARDCORE_UNLOCK_SCORE on hard
+    // grants the difficulty for future runs.
+    this.maybeUnlockHardcore();
   }
 
   private resize(): void {

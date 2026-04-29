@@ -1,0 +1,33 @@
+{
+  "identifier" : "C0FFEE-HEXRAIN-IAP",
+  "nonRenewingSubscriptions" : [],
+  "products" : [
+    {
+      "displayPrice" : "2.99",
+      "familyShareable" : false,
+      "internalID" : "C001",
+      "localizations" : [
+        {
+          "description" : "Unlock every challenge in every block right away.",
+          "displayName" : "Unlock All Challenges",
+          "locale" : "en_US"
+        }
+      ],
+      "productID" : "com.hexrain.app.unlockall",
+      "referenceName" : "Unlock All Challenges",
+      "type" : "NonConsumable"
+    }
+  ],
+  "settings" : {
+    "_compatibilityTimeRate" : 1,
+    "_failTransactionsEnabled" : false,
+    "_locale" : "en_US",
+    "_storefront" : "USA",
+    "_storeKitErrors" : []
+  },
+  "subscriptionGroups" : [],
+  "version" : {
+    "major" : 4,
+    "minor" : 0
+  }
+}
