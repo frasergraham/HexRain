@@ -71,7 +71,7 @@ the player always sees the warning frame before a fatal hit.
 ### Late-game ramp
 
 After score `LATE_RAMP_FLOOR_SCORE = 500`, base rate ramps `+10%` per 100
-points (`LATE_RAMP_PER_100`), capped at 2.5× at score 2500+. Slow / fast /
+points (`LATE_RAMP_PER_100`), capped at 1.8× at score 1300+. Slow / fast /
 hint / tutorial modifiers stack multiplicatively on top.
 
 ## Cluster kinds (`ClusterKind`)

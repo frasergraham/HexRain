@@ -5,6 +5,7 @@
 // (best score per challenge, completion list, unlocked blocks) is
 // stored under a single localStorage key.
 
+import type { ClusterKind } from "./types";
 import { parseWaveLine, validateChallenge, type ChallengeDefLike } from "./waveDsl";
 
 export interface ChallengeDef extends ChallengeDefLike {
@@ -16,16 +17,37 @@ export interface ChallengeProgress {
   best: Record<string, number>;
   /** Best percentage (0-100) the player has reached in each challenge. */
   bestPct: Record<string, number>;
+  /** Best star count (0..3) awarded on a 100% completion. */
+  stars: Record<string, number>;
   completed: string[];
   unlockedBlocks: number[];
 }
 
+export interface ChallengeStarThresholds {
+  /** Score needed for 1 star — barely-winning baseline. */
+  one: number;
+  /** Score needed for 2 stars — pickups + partial bonus. */
+  two: number;
+  /** Score needed for 3 stars — near upper bound. */
+  three: number;
+}
+
 const STORAGE_KEY = "hexrain.challenges.v1";
+
+// `?debug=1` unlocks every block immediately and disables challenge-progress
+// persistence so test runs (including the 199 / 399 / 599 score buttons) don't
+// pollute real save data.
+const DEBUG_MODE =
+  typeof window !== "undefined" &&
+  new URLSearchParams(window.location.search).get("debug") === "1";
+
+const ALL_BLOCKS = [1, 2, 3, 4, 5, 6];
 
 const EMPTY_PROGRESS: ChallengeProgress = {
   v: 1,
   best: {},
   bestPct: {},
+  stars: {},
   completed: [],
   unlockedBlocks: [1],
 };
@@ -37,49 +59,49 @@ export const CHALLENGES: ChallengeDef[] = [
   {
     id: "1-1", name: "First Drops", block: 1, index: 1, difficulty: 1,
     waves: [
-      "size=1-2, rate=1.0, speed=1.0, count=6",
-      "size=2, rate=0.85, speed=1.05, count=7, pct=normal:80,coin:20",
+      "size=1-2, rate=1.0, speed=1.0, count=6, pct=normal:75,coin:25",
+      "size=2, rate=0.85, speed=1.05, count=7, pct=normal:65,coin:35",
       "size=1, rate=0.25, speed=1.05, count=14",                         // first rain
-      "size=2-3, rate=0.8, speed=1.1, count=8, pct=normal:80,coin:20",
-      "size=2, rate=0.75, speed=1.15, count=9",
+      "size=2-3, rate=0.8, speed=1.1, count=8, pct=normal:65,coin:35",
+      "size=2, rate=0.75, speed=1.15, count=9, pct=normal:70,coin:30",
       "size=1, rate=0.22, speed=1.15, count=16",                         // rain
-      "size=2-3, rate=0.7, speed=1.2, count=10, pct=normal:80,coin:20",
-      "size=3, rate=0.7, speed=1.25, count=10",
+      "size=2-3, rate=0.7, speed=1.2, count=10, pct=normal:65,coin:35",
+      "size=3, rate=0.7, speed=1.25, count=10, pct=normal:70,coin:30",
       "size=1, rate=0.2, speed=1.25, count=18",                          // bigger rain
-      "size=2-3, rate=0.65, speed=1.3, count=11, pct=normal:85,coin:15",
+      "size=2-3, rate=0.65, speed=1.3, count=11, pct=normal:70,coin:30",
     ],
   },
   {
     id: "1-2", name: "Easy Rain", block: 1, index: 2, difficulty: 2,
     waves: [
-      "size=2, rate=0.9, speed=1.05, count=6",
+      "size=2, rate=0.9, speed=1.05, count=6, pct=normal:70,coin:30",
       "size=1, rate=0.22, speed=1.1, count=14",
-      "size=2-3, rate=0.8, speed=1.15, count=8, pct=normal:75,coin:25",
+      "size=2-3, rate=0.8, speed=1.15, count=8, pct=normal:65,coin:35",
       "size=1, rate=0.2, speed=1.2, count=16",
       "count=0, slotRate=0.55, speed=1.15, 130,230,330,430,530,000,330,230",
-      "size=2-3, rate=0.7, speed=1.25, count=10",
+      "size=2-3, rate=0.7, speed=1.25, count=10, pct=normal:65,coin:35",
       "size=1, rate=0.18, speed=1.3, count=20",                          // dense
-      "size=3, rate=0.65, speed=1.3, count=11, pct=normal:75,coin:25",
+      "size=3, rate=0.65, speed=1.3, count=11, pct=normal:65,coin:35",
       "size=1, rate=0.18, speed=1.35, count=22",
-      "size=3-4, rate=0.6, speed=1.4, count=12, pct=normal:75,coin:25",
+      "size=3-4, rate=0.6, speed=1.4, count=12, pct=normal:65,coin:35",
       "size=1, rate=0.16, speed=1.45, count=24",                         // finale rain
-      "size=3, rate=0.55, speed=1.5, count=13",
+      "size=3, rate=0.55, speed=1.5, count=13, pct=normal:70,coin:30",
     ],
   },
   {
     id: "1-3", name: "Slow Roll", block: 1, index: 3, difficulty: 2,
     effects: { slowDuration: 6 },
     waves: [
-      "size=2-3, rate=0.9, speed=1.0, count=7",
+      "size=2-3, rate=0.9, speed=1.0, count=7, pct=normal:70,coin:30",
       "size=1, rate=0.22, speed=1.1, count=15",
-      "size=3, rate=0.8, speed=1.15, count=9, pct=normal:70,coin:15,slow:15",   // slow intro
+      "size=3, rate=0.8, speed=1.15, count=9, pct=normal:55,coin:30,slow:15",   // slow intro
       "count=0, slotRate=0.55, speed=1.15, 230,330,430,000,330,230,430,330",
       "size=1, rate=0.2, speed=1.2, count=17",
-      "size=3, rate=0.75, speed=1.25, count=10, pct=normal:65,slow:20,coin:15",
+      "size=3, rate=0.75, speed=1.25, count=10, pct=normal:50,slow:20,coin:30",
       "size=1, rate=0.18, speed=1.25, count=18",
-      "size=3-4, rate=0.7, speed=1.3, count=11",
+      "size=3-4, rate=0.7, speed=1.3, count=11, pct=normal:65,coin:35",
       "size=1, rate=0.18, speed=1.3, count=20",                          // breath of rain
-      "size=3, rate=0.65, speed=1.35, count=12, pct=normal:65,slow:20,coin:15",
+      "size=3, rate=0.65, speed=1.35, count=12, pct=normal:50,slow:20,coin:30",
       "count=0, slotRate=0.5, speed=1.35, 230,330,430,000,330,230,430,000,330,430",
       "size=1, rate=0.16, speed=1.45, count=24",
     ],
@@ -87,17 +109,17 @@ export const CHALLENGES: ChallengeDef[] = [
   {
     id: "1-4", name: "Open Sky", block: 1, index: 4, difficulty: 3,
     waves: [
-      "size=2-3, rate=0.85, speed=1.05, count=7",
+      "size=2-3, rate=0.85, speed=1.05, count=7, pct=normal:70,coin:30",
       "count=0, slotRate=0.55, speed=1.1, 137,000,237,000,337,000,237,137",
       "size=1, rate=0.22, speed=1.15, count=15",
-      "size=3, rate=0.8, speed=1.2, count=9, pct=normal:65,sticky:25,coin:10",  // first heal blocks
+      "size=3, rate=0.8, speed=1.2, count=9, pct=normal:50,sticky:25,coin:25",  // first heal blocks
       "count=0, slotRate=0.5, speed=1.2, 048,000,148,000,248,000,348,000",
       "size=1, rate=0.2, speed=1.25, count=17",
-      "size=3-4, rate=0.7, speed=1.3, count=10, pct=normal:60,sticky:30,coin:10",
+      "size=3-4, rate=0.7, speed=1.3, count=10, pct=normal:45,sticky:30,coin:25",
       "count=0, slotRate=0.5, speed=1.3, 037,148,037,148,237,348,037,148",
       "size=1, rate=0.18, speed=1.35, count=20",
-      "size=3-4, rate=0.65, speed=1.4, count=12",
-      "size=4, rate=0.6, speed=1.45, count=13, pct=normal:65,sticky:25,coin:10",
+      "size=3-4, rate=0.65, speed=1.4, count=12, pct=normal:65,coin:35",
+      "size=4, rate=0.6, speed=1.45, count=13, pct=normal:50,sticky:25,coin:25",
       "size=1, rate=0.16, speed=1.5, count=24",
       "count=0, slotRate=0.45, speed=1.5, 037,148,237,348,037,148,237,348,137",
     ],
@@ -569,6 +591,95 @@ export function challengeById(id: string): ChallengeDef | undefined {
   return CHALLENGES.find((c) => c.id === id);
 }
 
+// === Star thresholds ======================================================
+
+const COMPLETION_BONUS = 20;
+// Single-stack fast multiplier: each cluster pass yields (mul-1)=2 to the
+// bonus pool, each coin yields 5*(mul-1)=10. Conservative — repeated fast
+// stacks raise the multiplier but the player rarely chains them perfectly.
+const FAST_MUL_MINUS_ONE = 2;
+const FAST_DEFAULT_DURATION = 5;
+
+/**
+ * Walk a challenge's waves, parse them, and produce 1/2/3-star thresholds.
+ *
+ * Logic: count every cluster the wave will spawn (slot tokens + countCap),
+ * distribute probabilistic spawns across the wave's pct weights, and tally
+ * coins / stickies / fast pickups. The "baseline" is what a player who
+ * completes the run scores by simply letting every cluster pass; the upper
+ * bound layers in the available pickup score plus an estimated fast bonus
+ * pool. Stars are spaced inside that range.
+ */
+export function computeStarThresholds(def: ChallengeDef): ChallengeStarThresholds {
+  let totalClusters = 0;
+  let coins = 0;
+  let stickies = 0;
+  let fasts = 0;
+  let totalDuration = 0;
+
+  for (const line of def.waves) {
+    let wave;
+    try { wave = parseWaveLine(line); } catch { continue; }
+
+    const slotClusters = wave.slots.filter((s) => s !== null).length;
+    const probClusters = wave.countCap ?? 0;
+    totalClusters += slotClusters + probClusters;
+
+    // Slot tokens always spawn as `normal` (no pct dispatch in the slot
+    // path), so they contribute only to the baseline pass score.
+    if (probClusters > 0) {
+      const w = wave.weights as Partial<Record<ClusterKind, number>>;
+      const wTotal = Object.values(w).reduce((a, b) => a + (b ?? 0), 0);
+      if (wTotal > 0) {
+        coins += probClusters * ((w.coin ?? 0) / wTotal);
+        stickies += probClusters * ((w.sticky ?? 0) / wTotal);
+        fasts += probClusters * ((w.fast ?? 0) / wTotal);
+      }
+    }
+
+    const slotTime = wave.slots.length * wave.slotInterval;
+    const probTime = probClusters * wave.spawnInterval;
+    totalDuration += wave.durOverride ?? Math.max(slotTime, probTime);
+  }
+
+  // Pickup score components.
+  // - Coin: pass +1 → collect +5, so collecting nets +4 over passing.
+  // - Sticky heal: +2 only when player is at size 1; counts ~half on average.
+  const coinPotential = coins * 4;
+  const healPotential = stickies * 1;
+
+  // Fast bonus: each pickup activates fastDuration seconds during which
+  // every passing cluster adds (mul-1) to the pool, every coin adds
+  // 5*(mul-1). Approximate using avg cluster/coin rate over the run.
+  const fastDur = def.effects?.fastDuration ?? FAST_DEFAULT_DURATION;
+  const clustersPerSec = totalDuration > 0 ? totalClusters / totalDuration : 0;
+  const coinsPerSec = totalDuration > 0 ? coins / totalDuration : 0;
+  const fastPoolPerPickup =
+    fastDur * (clustersPerSec * FAST_MUL_MINUS_ONE + coinsPerSec * 5 * FAST_MUL_MINUS_ONE);
+  const fastPotential = fasts * fastPoolPerPickup;
+
+  const baseline = totalClusters + COMPLETION_BONUS;
+  const bonusPotential = coinPotential + healPotential + fastPotential;
+
+  // 1 star: barely-winning baseline (allow some hit absorption).
+  // 3 star: near upper bound.
+  // 2 star: roughly midway between.
+  const one = Math.max(1, Math.round(baseline * 0.9));
+  const three = Math.max(baseline, Math.round(baseline + bonusPotential * 0.85));
+  const twoRaw = Math.round(baseline + bonusPotential * 0.45);
+  // Keep two strictly between one and three.
+  const two = Math.min(Math.max(twoRaw, one + 1), Math.max(one + 1, three - 1));
+
+  return { one, two, three };
+}
+
+export function awardStars(score: number, t: ChallengeStarThresholds): 0 | 1 | 2 | 3 {
+  if (score >= t.three) return 3;
+  if (score >= t.two) return 2;
+  if (score >= t.one) return 1;
+  return 0;
+}
+
 // === Persistence ==========================================================
 
 export function loadChallengeProgress(): ChallengeProgress {
@@ -580,12 +691,16 @@ export function loadChallengeProgress(): ChallengeProgress {
     const validIds = new Set(CHALLENGES.map((c) => c.id));
     const bestEntries = Object.entries(parsed.best ?? {}).filter(([id]) => validIds.has(id));
     const bestPctEntries = Object.entries(parsed.bestPct ?? {}).filter(([id]) => validIds.has(id));
+    const starsEntries = Object.entries(parsed.stars ?? {})
+      .filter(([id]) => validIds.has(id))
+      .map(([id, n]) => [id, Math.max(0, Math.min(3, Math.round(Number(n) || 0)))] as const);
     const completed = (parsed.completed ?? []).filter((id) => validIds.has(id));
     const unique = Array.from(new Set(completed)).sort();
     return {
       v: 1,
       best: Object.fromEntries(bestEntries),
       bestPct: Object.fromEntries(bestPctEntries),
+      stars: Object.fromEntries(starsEntries),
       completed: unique,
       unlockedBlocks: recomputeUnlocked(new Set(unique)),
     };
@@ -595,6 +710,7 @@ export function loadChallengeProgress(): ChallengeProgress {
 }
 
 function save(p: ChallengeProgress): void {
+  if (DEBUG_MODE) return;
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(p));
   } catch { /* ignore quota / private mode */ }
@@ -616,15 +732,18 @@ export function saveChallengeBest(id: string, score: number, pct = 0): Challenge
   return next;
 }
 
-export function saveChallengeCompletion(id: string, score: number): ChallengeProgress {
+export function saveChallengeCompletion(id: string, score: number, stars: number): ChallengeProgress {
   const p = loadChallengeProgress();
   const prevScore = p.best[id] ?? 0;
+  const prevStars = p.stars[id] ?? 0;
+  const newStars = Math.max(prevStars, Math.max(0, Math.min(3, Math.round(stars))));
   const completed = new Set(p.completed);
   completed.add(id);
   const next: ChallengeProgress = {
     v: 1,
     best: { ...p.best, [id]: Math.max(prevScore, score) },
     bestPct: { ...p.bestPct, [id]: 100 },
+    stars: { ...p.stars, [id]: newStars },
     completed: Array.from(completed).sort(),
     unlockedBlocks: recomputeUnlocked(completed),
   };
@@ -633,6 +752,7 @@ export function saveChallengeCompletion(id: string, score: number): ChallengePro
 }
 
 function recomputeUnlocked(completed: Set<string>): number[] {
+  if (DEBUG_MODE) return [...ALL_BLOCKS];
   const out = [1];
   for (let b = 1; b < 6; b++) {
     let inBlock = 0;

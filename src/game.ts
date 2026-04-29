@@ -38,7 +38,9 @@ import type { Axial, ClusterKind, Difficulty, GameMode, GameState, InputAction, 
 import { ANGLE_TABLE, parseWaveLine, type ParsedWave } from "./waveDsl";
 import {
   CHALLENGES,
+  awardStars,
   challengeById,
+  computeStarThresholds,
   loadChallengeProgress,
   saveChallengeBest,
   saveChallengeCompletion,
@@ -724,6 +726,19 @@ export class Game {
         this.quitToMenu();
         return;
       }
+      // Debug "start at N" button (only present when ?debug=1).
+      const debugPlayBtn = target?.closest('button[data-action="debug-play"]') as HTMLButtonElement | null;
+      if (debugPlayBtn) {
+        playSfx("click");
+        const select = this.overlay.querySelector<HTMLSelectElement>("#debugStartScore");
+        const score = parseInt(select?.value ?? "0", 10);
+        this.debugStartScore = Number.isFinite(score) ? score : 0;
+        this.setGameMode("endless");
+        this.activeChallenge = null;
+        this.effectOverrides = null;
+        this.startOrRestart(this.debugStartScore);
+        return;
+      }
       // PLAY / PLAY AGAIN button on menu and game-over overlays.
       const playBtn = target?.closest('button[data-action="play"]') as HTMLButtonElement | null;
       if (playBtn) {
@@ -741,7 +756,11 @@ export class Game {
         this.setGameMode("endless");
         this.activeChallenge = null;
         this.effectOverrides = null;
-        this.startOrRestart();
+        // Debug-mode replays restart from the same picked score so the
+        // tester doesn't have to hop back to the menu and re-pick it.
+        const replayScore =
+          this.debugEnabled && this.debugStartScore > 0 ? this.debugStartScore : 0;
+        this.startOrRestart(replayScore);
         return;
       }
       // CHALLENGES menu button.
@@ -818,9 +837,8 @@ export class Game {
       }
     });
 
-    if (new URLSearchParams(window.location.search).get("debug") === "1") {
-      this.installDebugButtons();
-    }
+    this.debugEnabled =
+      new URLSearchParams(window.location.search).get("debug") === "1";
 
     this.renderMenu();
 
@@ -974,29 +992,38 @@ export class Game {
     host.innerHTML = cells.join("");
   }
 
-  private installDebugButtons(): void {
-    const parent = this.overlay.parentElement;
-    if (!parent) return;
-    const container = document.createElement("div");
-    container.className = "debug-buttons";
-    container.id = "debugButtons";
+  // ?debug=1 swaps the menu's PLAY button for a row of "start at N"
+  // shortcuts so test runs can begin at high scores without grinding.
+  // Challenge screens never get these — they have their own debug
+  // affordance via the unlocked-by-default block list (DEBUG_MODE in
+  // challenges.ts).
+  private debugApplyMenu(): void {
+    if (!this.debugEnabled) return;
+    const playBtn = this.overlay.querySelector<HTMLButtonElement>(
+      'button.play-btn[data-action="play"]',
+    );
+    if (!playBtn) return;
+    const row = document.createElement("div");
+    row.className = "debug-start-buttons";
     const label = document.createElement("span");
     label.className = "debug-label";
     label.textContent = "DEBUG · start at";
-    container.appendChild(label);
-    for (const score of [199, 399, 599]) {
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.textContent = String(score);
-      btn.addEventListener("click", (e) => {
-        // stopPropagation prevents the overlay's own click handler from
-        // ALSO firing and resetting the score back to 0.
-        e.stopPropagation();
-        this.startOrRestart(score);
-      });
-      container.appendChild(btn);
+    row.appendChild(label);
+    const select = document.createElement("select");
+    select.id = "debugStartScore";
+    for (let s = 100; s <= 1500; s += 100) {
+      const opt = document.createElement("option");
+      opt.value = String(s);
+      opt.textContent = String(s);
+      select.appendChild(opt);
     }
-    parent.appendChild(container);
+    row.appendChild(select);
+    const goBtn = document.createElement("button");
+    goBtn.type = "button";
+    goBtn.textContent = "GO";
+    goBtn.dataset.action = "debug-play";
+    row.appendChild(goBtn);
+    playBtn.replaceWith(row);
   }
 
   start(): void {
@@ -1019,6 +1046,18 @@ export class Game {
   // True if the current run started above zero (i.e. via a debug button),
   // in which case the high score should NOT be banked at game over.
   private debugRun = false;
+  private debugEnabled = false;
+  // Last "start at N" the player picked from the debug dropdown, so the
+  // PLAY AGAIN button on game-over can resume from the same score.
+  private debugStartScore = 0;
+
+  // Achievement gate: in ?debug=1 mode no achievements get reported, so
+  // experimenting with high-score test runs doesn't dirty Game Center
+  // / localStorage achievement state.
+  private awardAchievement(id: AchievementId): void {
+    if (this.debugEnabled) return;
+    void reportAchievement(id);
+  }
 
   private startOrRestart(initialScore = 0): void {
     this.resetRunState(initialScore);
@@ -1057,6 +1096,7 @@ export class Game {
     // would leave the PAUSED text on screen.
     this.overlay.innerHTML = this.menuOverlayHtml;
     this.overlay.classList.remove("hidden");
+    this.debugApplyMenu();
     this.renderAchievementBadges();
     this.refreshDifficultyButtons();
     this.refreshAudioToggles();
@@ -1064,11 +1104,21 @@ export class Game {
     // useful number. Hide the score block until a run starts.
     this.setScoreVisible(false);
     this.setPauseButtonVisible(false);
+    this.setHudVisible(true);
   }
 
   private setScoreVisible(visible: boolean): void {
     const scoreParent = this.scoreEl.parentElement;
     if (scoreParent) scoreParent.hidden = !visible;
+  }
+
+  // Hide the whole HUD (score + BEST + pause). Used on screens that have
+  // their own sticky header — the HUD sits above the overlay (z-index 5)
+  // so leaving the BEST value on screen makes it overlap challenge-select
+  // controls like the back button.
+  private setHudVisible(visible: boolean): void {
+    const hud = document.querySelector<HTMLElement>(".hud");
+    if (hud) hud.hidden = !visible;
   }
 
   private setPauseButtonVisible(visible: boolean): void {
@@ -1081,6 +1131,7 @@ export class Game {
     this.state = "challengeSelect";
     this.setScoreVisible(false);
     this.setPauseButtonVisible(false);
+    this.setHudVisible(false);
     this.renderChallengeSelect();
     this.overlay.classList.remove("hidden");
   }
@@ -1088,6 +1139,7 @@ export class Game {
   private openChallengeIntro(def: ChallengeDef): void {
     this.activeChallenge = def;
     this.state = "challengeIntro";
+    this.setHudVisible(false);
     this.renderChallengeIntro();
   }
 
@@ -1095,6 +1147,7 @@ export class Game {
     // Move from intro/replay/select directly into a fresh challenge run.
     this.state = "playing";
     this.overlay.classList.add("hidden");
+    this.setHudVisible(true);
     this.setScoreVisible(true);
     this.setPauseButtonVisible(true);
     this.setSliderEnabled(true);
@@ -1117,6 +1170,8 @@ export class Game {
       const cards = arr.map((c) => {
         const best = progress.best[c.id] ?? 0;
         const bestPct = progress.bestPct[c.id] ?? 0;
+        const earnedStars = progress.stars[c.id] ?? 0;
+        const attempted = best > 0 || bestPct > 0 || earnedStars > 0;
         const done = progress.completed.includes(c.id);
         const cardCls = !unlocked
           ? "challenge-card locked"
@@ -1134,28 +1189,43 @@ export class Game {
           hexes.push(`<span class="challenge-card-hex" style="background:${tint};"></span>`);
         }
         const check = done ? '<span class="check">✓</span>' : "";
+        const starsHtml = unlocked && attempted
+          ? `<div class="challenge-card-stars">${
+              [0, 1, 2].map((i) =>
+                `<span class="challenge-card-star${i < earnedStars ? " earned" : ""}">★</span>`,
+              ).join("")
+            }</div>`
+          : "";
         return `
           <button type="button" class="${cardCls}" data-challenge-id="${c.id}" ${unlocked ? "" : "disabled"}>
             <span class="challenge-card-id">${c.id}</span>
             <span class="challenge-card-name">${name}</span>
             <div class="challenge-card-hexes">${hexes.join("")}</div>
+            ${starsHtml}
             <span class="challenge-card-best">${bestScoreText} ${pctText}</span>
             ${check}
           </button>
         `;
       }).join("");
-      const subhint = unlocked
-        ? blockNum < 6
-          ? `Complete 3 of 5 to unlock Block ${blockNum + 1}`
-          : "Final block"
-        : `Complete 3 in Block ${blockNum - 1} to unlock`;
+      const blockCls = unlocked ? "challenge-block" : "challenge-block locked";
+      const headerProgress = unlocked
+        ? `<span class="progress">${completedInBlock}/5</span>`
+        : "";
+      const body = unlocked
+        ? `<div class="challenge-cards">${cards}</div>`
+        : `
+          <div class="challenge-block-lock">
+            <div class="challenge-block-lock-icon" aria-hidden="true">🔒</div>
+            <p>Complete 3 Block ${blockNum - 1} challenges to unlock</p>
+          </div>
+        `;
       return `
-        <section class="challenge-block">
+        <section class="${blockCls}">
           <header class="challenge-block-header">
             <span>Block ${blockNum}</span>
-            <span class="progress">${completedInBlock}/5 ${unlocked ? "" : "·"} ${subhint}</span>
+            ${headerProgress}
           </header>
-          <div class="challenge-cards">${cards}</div>
+          ${body}
         </section>
       `;
     }).join("");
@@ -1202,11 +1272,21 @@ export class Game {
     const progress = loadChallengeProgress();
     const best = progress.best[def.id] ?? 0;
     const newBest = this.score >= best;
+    const thresholds = computeStarThresholds(def);
+    const earned = awardStars(this.score, thresholds);
+    const starHtml: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      const filled = i < earned;
+      starHtml.push(
+        `<span class="challenge-star${filled ? " earned" : " empty"}" data-star-idx="${i}">★</span>`,
+      );
+    }
     this.overlay.innerHTML = `
       <div class="challenge-intro">
         <p class="challenge-complete-banner">Challenge Complete</p>
         <span class="id">${def.id}</span>
         <h1>${escapeHtml(def.name)}</h1>
+        <div class="challenge-stars-big">${starHtml.join("")}</div>
         <p class="tagline">Score ${this.score}${newBest ? " · NEW BEST" : ` · Best ${best}`}</p>
         <button type="button" class="play-btn" data-action="play">PLAY AGAIN</button>
         <button type="button" class="challenge-back" data-action="challenge-back">Back</button>
@@ -1215,6 +1295,21 @@ export class Game {
     `;
     this.overlay.classList.remove("hidden");
     this.setScoreVisible(false);
+    this.setHudVisible(false);
+
+    // Stagger star pop-in: each earned star fades + scales in with an
+    // impact "POP" sound. Empty stars appear quietly at the end.
+    const starEls = Array.from(
+      this.overlay.querySelectorAll<HTMLSpanElement>(".challenge-star"),
+    );
+    const STAR_STEP_MS = 280;
+    const FIRST_STAR_DELAY_MS = 320;
+    starEls.forEach((el, i) => {
+      window.setTimeout(() => {
+        el.classList.add("pop");
+        if (el.classList.contains("earned")) playSfx("impact");
+      }, FIRST_STAR_DELAY_MS + i * STAR_STEP_MS);
+    });
   }
 
   private setSliderEnabled(enabled: boolean): void {
@@ -1400,10 +1495,13 @@ export class Game {
       const def = this.activeChallenge;
       const progress = loadChallengeProgress();
       const best = progress.best[def.id] ?? 0;
+      const pct = Math.max(0, Math.min(100, Math.round(this.progress * 100)));
+      const pctCls = pct >= 100 ? "challenge-pct full" : "challenge-pct partial";
       this.overlay.innerHTML = `
         <div class="challenge-gameover">
           <h1>GAME OVER</h1>
           <p class="tagline">${escapeHtml(def.name)} · ${def.id}</p>
+          <div class="${pctCls}">${pct}%</div>
           <p class="tagline">Score ${this.score} · Best ${best}</p>
           <button type="button" class="play-btn" data-action="play">RETRY</button>
           <button type="button" class="challenge-back" data-action="challenge-back">Back to challenges</button>
@@ -1651,7 +1749,7 @@ export class Game {
     // Survivor: was in danger and clawed back to a single hex.
     if (playerSize >= DANGER_SIZE) this.wasInDangerThisRun = true;
     if (this.wasInDangerThisRun && playerSize === 1) {
-      void reportAchievement(ACHIEVEMENTS.survivor);
+      this.awardAchievement(ACHIEVEMENTS.survivor);
       this.wasInDangerThisRun = false;
     }
 
@@ -1694,7 +1792,7 @@ export class Game {
     // never extends past the board bottom — and to the (possibly pinched)
     // side rails.
     this.player.clampToRail(this.playerY);
-    this.player.clampBoundsX(this.currentRailLeft(), this.currentRailRight());
+    this.player.clampBoundsX(this.currentRailLeft(this.playerY), this.currentRailRight(this.playerY));
 
     this.player.update(dt);
 
@@ -1860,19 +1958,19 @@ export class Game {
       // pop four banners back-to-back.
       for (let i = BONUS_POOL_TIERS.length - 1; i >= 0; i--) {
         if (banked >= BONUS_POOL_TIERS[i]!.threshold) {
-          void reportAchievement(BONUS_POOL_TIERS[i]!.id);
+          this.awardAchievement(BONUS_POOL_TIERS[i]!.id);
           break;
         }
       }
       // Multiplier achievements based on the peak the player held when the
       // bonus actually banked. Same single-tier rule as the pool tiers.
-      if (mul >= 6) void reportAchievement(ACHIEVEMENTS.bonus6x);
-      else if (mul >= 5) void reportAchievement(ACHIEVEMENTS.bonus5x);
-      else if (mul >= 4) void reportAchievement(ACHIEVEMENTS.bonus4x);
-      else if (mul >= 3) void reportAchievement(ACHIEVEMENTS.bonus3x);
+      if (mul >= 6) this.awardAchievement(ACHIEVEMENTS.bonus6x);
+      else if (mul >= 5) this.awardAchievement(ACHIEVEMENTS.bonus5x);
+      else if (mul >= 4) this.awardAchievement(ACHIEVEMENTS.bonus4x);
+      else if (mul >= 3) this.awardAchievement(ACHIEVEMENTS.bonus3x);
       // Trifecta: bank the payout while a shield is up and a drone is out.
       if (this.shieldTimer > 0 && this.drones.length > 0) {
-        void reportAchievement(ACHIEVEMENTS.trifecta);
+        this.awardAchievement(ACHIEVEMENTS.trifecta);
       }
     }
     const p = this.fastBonusHudPos();
@@ -2045,8 +2143,8 @@ export class Game {
     if (this.slideTarget !== null) {
       const halfBoundsW =
         (this.player.body.bounds.max.x - this.player.body.bounds.min.x) / 2;
-      const railLeft = this.currentRailLeft();
-      const railRight = this.currentRailRight();
+      const railLeft = this.currentRailLeft(this.playerY);
+      const railRight = this.currentRailRight(this.playerY);
       const railCenter = (railLeft + railRight) / 2;
       const usableHalfWidth = Math.max(0, (railRight - railLeft) / 2 - halfBoundsW);
       const targetX = railCenter + this.slideTarget * usableHalfWidth;
@@ -3487,7 +3585,9 @@ export class Game {
       "rgba(120, 255, 170, 0.95)",
     );
 
-    const progress = saveChallengeCompletion(def.id, this.score);
+    const thresholds = computeStarThresholds(def);
+    const stars = awardStars(this.score, thresholds);
+    const progress = saveChallengeCompletion(def.id, this.score, stars);
     // Block completion → achievement.
     const block = def.block;
     const allInBlockDone = CHALLENGES
@@ -3502,7 +3602,7 @@ export class Game {
         ACHIEVEMENTS.challengeBlock5,
         ACHIEVEMENTS.challengeBlock6,
       ] as const)[block - 1];
-      if (achId) void reportAchievement(achId);
+      if (achId) this.awardAchievement(achId);
     }
 
     this.state = "challengeComplete";
@@ -3570,10 +3670,10 @@ export class Game {
   // game's base rate by 10%, so 600 → 1.1×, 1000 → 1.5×, 1500 → 2.0×.
   // Slow / fast / hint / tutorial modifiers all multiply on top, so a
   // 1.0× slow at score 1000 is 0.75× wall-clock and a 1.25× fast is
-  // 1.875×. Capped at 2.5× so the game stays playable at extreme scores.
+  // 1.875×. Capped at 1.8× so the game stays playable at extreme scores.
   private lateGameSpeedMul(): number {
     const raw = 1 + Math.max(0, (this.score - LATE_RAMP_FLOOR_SCORE) / 100) * LATE_RAMP_PER_100;
-    return Math.min(2.5, raw);
+    return Math.min(1.8, raw);
   }
 
   private advanceWavePhase(dt: number): void {
@@ -4054,7 +4154,7 @@ export class Game {
     while (this.nextMilestoneIdx < milestones.length) {
       const m = milestones[this.nextMilestoneIdx]!;
       if (this.score < m.threshold) break;
-      void reportAchievement(m.id);
+      this.awardAchievement(m.id);
       this.nextMilestoneIdx += 1;
     }
   }

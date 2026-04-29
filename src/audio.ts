@@ -95,14 +95,26 @@ const buffers = new Map<string, AudioBuffer>();
 const inflight = new Map<string, Promise<AudioBuffer>>();
 
 // iOS WKWebView interrupts the audio session when the app backgrounds,
-// gets a phone call, hears Siri, etc. The context ends up "suspended"
-// or "interrupted" and resume() doesn't always recover. We listen for
-// visibility / foreground events and try to resume; if the context is
-// truly dead we tear it down so the next user gesture rebuilds it.
-function tryResumeOnForeground(): void {
+// gets a phone call, hears Siri, etc. After foregrounding the context
+// often reports "running" again but the underlying render graph is
+// dead — SFX play silently and music stays muted. The only reliable
+// fix is to tear down whenever we were actually hidden, so the next
+// user gesture (or music intent) rebuilds against a fresh graph.
+let wasHidden = false;
+async function tryResumeOnForeground(): Promise<void> {
+  const dirty = wasHidden;
+  wasHidden = false;
   if (!ctx) return;
-  if (ctx.state === "running") return;
-  ctx.resume().catch(() => { /* ignore */ });
+  if (dirty) {
+    tearDownContext();
+  } else if (ctx.state === "suspended") {
+    try { await ctx.resume(); } catch { /* ignore */ }
+  }
+  // Music intent survives teardown; restart it now (creates a fresh
+  // ctx if needed). SFX rebuilds lazily on the next playSfx().
+  if (musicWanted && musicOn) {
+    void startMusicInternal();
+  }
 }
 
 function tearDownContext(): void {
@@ -125,12 +137,15 @@ function tearDownContext(): void {
 
 if (typeof window !== "undefined") {
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) tryResumeOnForeground();
+    if (document.hidden) wasHidden = true;
+    else void tryResumeOnForeground();
   });
+  window.addEventListener("pagehide", () => { wasHidden = true; });
+  window.addEventListener("blur", () => { wasHidden = true; });
   // pageshow fires on bfcache restore (iOS sometimes uses it instead of
   // visibilitychange when returning from the app switcher).
-  window.addEventListener("pageshow", tryResumeOnForeground);
-  window.addEventListener("focus", tryResumeOnForeground);
+  window.addEventListener("pageshow", () => { void tryResumeOnForeground(); });
+  window.addEventListener("focus", () => { void tryResumeOnForeground(); });
 }
 
 function getCtx(): AudioContext | null {
