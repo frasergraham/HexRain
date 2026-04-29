@@ -614,6 +614,24 @@ export class Game {
       const ro = new ResizeObserver(() => this.resize());
       ro.observe(this.canvas);
     }
+    // iOS WKWebView restores from the app switcher with a brief window
+    // where the layout is half-rendered; the ResizeObserver can latch
+    // onto that intermediate snapshot and leave the canvas locked tiny.
+    // Re-fire resize across a few rAFs after every foreground transition.
+    const recoverResize = () => {
+      requestAnimationFrame(() => {
+        this.resize();
+        requestAnimationFrame(() => {
+          this.resize();
+          requestAnimationFrame(() => this.resize());
+        });
+      });
+    };
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) recoverResize();
+    });
+    window.addEventListener("pageshow", recoverResize);
+    window.addEventListener("focus", recoverResize);
 
     if (isTouchDevice()) this.touchbar.classList.add("show");
     this.touchbar.setAttribute("aria-hidden", "false");
@@ -4164,6 +4182,17 @@ export class Game {
     const rect = this.canvas.getBoundingClientRect();
     const cssW = Math.max(1, rect.width);
     const cssH = Math.max(1, rect.height);
+
+    // iOS WKWebView occasionally reports a stale, ~quarter-sized layout
+    // during the brief foreground restore from the app switcher. If we
+    // accept that reading we end up locked to a tiny play area until the
+    // next manual resize. Bail out if the canvas reports a width well
+    // under the document width — the foreground hook will retry across
+    // the next animation frames.
+    const docW = Math.max(window.innerWidth || 0, document.documentElement?.clientWidth || 0);
+    if (docW > 1 && cssW < docW * 0.5) {
+      return;
+    }
 
     this.canvas.width = Math.round(cssW * dpr);
     this.canvas.height = Math.round(cssH * dpr);
