@@ -492,11 +492,18 @@ body {
   color: #6f7aa6;
   border-color: rgba(91, 139, 255, 0.18);
   background: rgba(20, 22, 38, 0.55);
+  /* Lock icon eats horizontal room — tighten the label so PAINFUL
+     stops clipping inside its 1/4-of-340px slot. */
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  padding-left: 4px;
+  padding-right: 4px;
 }
 
 .difficulty-buttons button.locked::before {
   content: "🔒 ";
-  font-size: 10px;
+  font-size: 9px;
+  margin-right: 1px;
 }
 
 /* --- Debug start-at-score buttons (only present with ?debug=1) ---
@@ -775,12 +782,17 @@ body {
   letter-spacing: 0.04em;
   line-height: 1.5;
   color: #d2d9f5;
+  /* Keep bullet rows left-aligned even though the overlay sets
+     text-align: center — otherwise wrapped lines re-centre under the
+     bullet and the row reads as "weirdly centred". */
+  text-align: left;
 }
 
 .unlock-shop-list li {
-  display: flex;
-  gap: 10px;
-  align-items: flex-start;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: 10px;
+  align-items: baseline;
 }
 
 .unlock-shop-list strong {
@@ -790,7 +802,6 @@ body {
 
 .unlock-shop-bullet {
   color: #ffd86b;
-  flex: 0 0 auto;
 }
 
 .unlock-shop-actions {

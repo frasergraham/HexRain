@@ -55,6 +55,7 @@ import {
   restoreUnlockAll,
   type ProductInfo,
 } from "./storeKit";
+import { hashSeed, mulberry32, type Random } from "./rng";
 
 // Score-club achievements are difficulty-gated: easy earns none, medium
 // earns the standard ladder, and hard earns the Elite ladder. The
@@ -114,8 +115,12 @@ interface DifficultyConfig {
   fastDurationMul?: number;
   shieldDurationMul?: number;
   droneDurationMul?: number;
-  // Score at which the inward narrowing wave variant unlocks.
+  // Score thresholds for wall variants. `narrowingScore` gates pinch
+  // (the original "narrowing wave" hence the legacy name); zigzag and
+  // narrow have their own thresholds that hardcore lowers aggressively.
   narrowingScore: number;
+  zigzagScore: number;
+  narrowScore: number;
   // Player size at which the danger glow appears and a blue hit becomes
   // lethal. Default 7; hardcore drops it to 3.
   dangerSize: number;
@@ -131,6 +136,8 @@ const DIFFICULTY_CONFIG: Record<Difficulty, DifficultyConfig> = {
     droneMul: 1.5,
     effectDurationMul: 1.2,
     narrowingScore: 600,
+    zigzagScore: 800,
+    narrowScore: 1000,
     dangerSize: 7,
   },
   medium: {
@@ -142,6 +149,8 @@ const DIFFICULTY_CONFIG: Record<Difficulty, DifficultyConfig> = {
     droneMul: 1.0,
     effectDurationMul: 1.0,
     narrowingScore: 600,
+    zigzagScore: 800,
+    narrowScore: 1000,
     dangerSize: 7,
   },
   hard: {
@@ -153,6 +162,8 @@ const DIFFICULTY_CONFIG: Record<Difficulty, DifficultyConfig> = {
     droneMul: 0.6,
     effectDurationMul: 0.8,
     narrowingScore: 200,
+    zigzagScore: 800,
+    narrowScore: 1000,
     dangerSize: 7,
   },
   hardcore: {
@@ -168,6 +179,8 @@ const DIFFICULTY_CONFIG: Record<Difficulty, DifficultyConfig> = {
     shieldDurationMul: 0.5,
     droneDurationMul: 0.5,
     narrowingScore: 100,
+    zigzagScore: 200,
+    narrowScore: 400,
     dangerSize: 3,
   },
 };
@@ -1164,6 +1177,11 @@ export class Game {
   // surface (menu vs challenge select).
   private unlockShopReturnState: GameState = "menu";
 
+  // Spawn-side RNG. Defaults to Math.random for endless mode; swapped
+  // to a seeded mulberry32 keyed on the challenge id at startChallenge,
+  // so a given challenge plays back the same wave sequence every time.
+  private rng: Random = Math.random;
+
   // Achievement gate: in ?debug=1 mode no achievements get reported, so
   // experimenting with high-score test runs doesn't dirty Game Center
   // / localStorage achievement state.
@@ -1418,7 +1436,7 @@ export class Game {
     const blocks: ChallengeDef[][] = [[], [], [], [], [], []];
     for (const c of CHALLENGES) blocks[c.block - 1]!.push(c);
     for (const arr of blocks) arr.sort((a, b) => a.index - b.index);
-    const blockHtml = blocks.map((arr, idx) => {
+    const blockHtmlByIndex = blocks.map((arr, idx) => {
       const blockNum = idx + 1;
       const unlocked = progress.unlockedBlocks.includes(blockNum);
       const completedInBlock = arr.filter((c) => progress.completed.includes(c.id)).length;
@@ -1483,11 +1501,15 @@ export class Game {
           ${body}
         </section>
       `;
-    }).join("");
+    });
     // IAP banner: shown on every platform when not already purchased.
     // The web build doesn't actually ship to users — keeping the banner
     // visible there makes layout/copy review easier without round-
     // tripping through a TestFlight build.
+    //
+    // Placement: directly after the highest-numbered unlocked block, so
+    // it sits adjacent to the wall the player is currently bumping into
+    // rather than floating at the top of the screen on every visit.
     const showIapBanner = !progress.purchasedUnlock;
     const priceLabel = this.unlockProduct?.displayPrice;
     const iapHtml = showIapBanner
@@ -1500,6 +1522,12 @@ export class Game {
         </div>
       `
       : "";
+    const lastUnlockedIdx = Math.max(0, ...progress.unlockedBlocks.map((n) => n - 1));
+    const sections: string[] = [];
+    blockHtmlByIndex.forEach((html, idx) => {
+      sections.push(html);
+      if (idx === lastUnlockedIdx && iapHtml) sections.push(iapHtml);
+    });
     this.overlay.innerHTML = `
       <div class="challenge-select">
         <div class="challenge-select-top">
@@ -1507,8 +1535,7 @@ export class Game {
           <span style="font-size:13px; letter-spacing:0.18em; text-transform:uppercase; color:#aab4dc;">Challenges</span>
           <span style="width:60px"></span>
         </div>
-        ${iapHtml}
-        ${blockHtml}
+        ${sections.join("")}
       </div>
     `;
   }
@@ -1893,7 +1920,12 @@ export class Game {
       });
     }
 
-    if (this.state === "menu" || this.state === "challengeSelect" || this.state === "challengeIntro") {
+    if (
+      this.state === "menu" ||
+      this.state === "challengeSelect" ||
+      this.state === "challengeIntro" ||
+      this.state === "unlockShop"
+    ) {
       // Pre-game test drive: accept input + step physics so the player can
       // try out the controls. No spawning, no scoring, no wave system.
       this.applyMovementInput();
@@ -3555,6 +3587,9 @@ export class Game {
   private setGameMode(mode: GameMode): void {
     if (this.gameMode === mode) return;
     this.gameMode = mode;
+    // Endless mode reverts to Math.random so each run is fresh; challenge
+    // mode reseeds inside startChallenge().
+    if (mode === "endless") this.rng = Math.random;
     this.resize();
   }
 
@@ -3571,6 +3606,10 @@ export class Game {
     this.challengeFinishingHold = 0;
     this.progress = 0;
     this.progressDisplayed = 0;
+    // Seed the spawn-side RNG from the challenge id so replays produce
+    // the same wave sequence (shapes, sizes, kind dispatches, side-entry
+    // direction, column picks). Endless mode keeps Math.random.
+    this.rng = mulberry32(hashSeed(def.id));
     this.beginChallengeWave();
     trackChallengeStart(def.block);
   }
@@ -3690,7 +3729,7 @@ export class Game {
     let size = sizeRaw;
     // Narrow walls can't fit size-4+ polyhexes through the corridor; clamp.
     if (wave.walls === "narrow" && size >= 3) size = 2;
-    const shape = buildPolyhexShape(size, Math.random);
+    const shape = buildPolyhexShape(size, this.rng);
 
     const angle = ANGLE_TABLE[Math.max(0, Math.min(9, slot.angleIdx))] as {
       tilt: number;
@@ -3722,10 +3761,10 @@ export class Game {
       const halfBoard = this.boardHeight * 0.5;
       const yMin = this.hexSize * 2;
       const yMax = Math.max(yMin + this.hexSize, halfBoard - this.hexSize);
-      y = this.boardOriginY + yMin + Math.random() * (yMax - yMin);
-      const sideAngle = 0.08 + Math.random() * 0.12;
+      y = this.boardOriginY + yMin + this.rng() * (yMax - yMin);
+      const sideAngle = 0.08 + this.rng() * 0.12;
       const total = speed * 1.4;
-      const fromLeft = angle.sideEntry === "left" || (angle.sideEntry === "random" && Math.random() < 0.5);
+      const fromLeft = angle.sideEntry === "left" || (angle.sideEntry === "random" && this.rng() < 0.5);
       sideEntryFromLeft = fromLeft;
       if (fromLeft) {
         x = this.boardOriginX - this.hexSize * 1.2;
@@ -3739,7 +3778,7 @@ export class Game {
     } else {
       x = railCenter + colStep * colWidth;
       y = this.boardOriginY - this.hexSize * 4;
-      const tilt = angle.tilt + (angle.randomTilt ? (Math.random() - 0.5) * angle.randomTilt : 0) + wave.defaultDir;
+      const tilt = angle.tilt + (angle.randomTilt ? (this.rng() - 0.5) * angle.randomTilt : 0) + wave.defaultDir;
       vx = Math.sin(tilt) * speed;
       vy = Math.cos(tilt) * speed;
     }
@@ -3754,7 +3793,7 @@ export class Game {
   private spawnChallengeProbabilistic(wave: ParsedWave): void {
     const total = Object.values(wave.weights).reduce((a, b) => a + (b ?? 0), 0);
     if (total <= 0) return;
-    let r = Math.random() * total;
+    let r = this.rng() * total;
     let kind: ClusterKind = "normal";
     for (const [k, w] of Object.entries(wave.weights)) {
       const ww = w ?? 0;
@@ -3769,9 +3808,9 @@ export class Game {
     if (isPickup) {
       shape = COIN_SHAPE;
     } else {
-      const sz = wave.sizeMin + Math.floor(Math.random() * (wave.sizeMax - wave.sizeMin + 1));
+      const sz = wave.sizeMin + Math.floor(this.rng() * (wave.sizeMax - wave.sizeMin + 1));
       const sizeClamped = wave.walls === "narrow" && sz >= 3 ? 2 : sz;
-      shape = buildPolyhexShape(Math.max(1, Math.min(5, sizeClamped)), Math.random);
+      shape = buildPolyhexShape(Math.max(1, Math.min(5, sizeClamped)), this.rng);
     }
 
     // Pick a column avoiding the safe lane for prob spawns.
@@ -3811,7 +3850,7 @@ export class Game {
       hexSize: this.hexSize,
       kind,
       initialSpeedY: speed,
-      initialSpin: (Math.random() - 0.5) * 0.08,
+      initialSpin: (this.rng() - 0.5) * 0.08,
     });
     Body.setVelocity(cluster.body, { x: vx, y: vy });
     cluster.body.collisionFilter.category = CAT_CLUSTER;
@@ -4003,7 +4042,9 @@ export class Game {
   // Hardcore mode is locked until the player either scores HARDCORE_THRESHOLD
   // on hard or buys the unlock-everything IAP. We snapshot the org-unlock
   // path in localStorage so it survives across runs without a re-derivation.
+  // ?debug=1 also opens it so test sessions can pick PAINFUL without grinding.
   private isHardcoreUnlocked(): boolean {
+    if (this.debugEnabled) return true;
     if (localStorage.getItem(HARDCORE_UNLOCK_KEY) === "1") return true;
     return loadChallengeProgress().purchasedUnlock;
   }
@@ -4129,11 +4170,12 @@ export class Game {
   // narrow > zigzag > pinch > none. Mutually exclusive.
   private chooseWallForEndlessWave(): void {
     const r = Math.random();
-    if (this.score >= 1000 && r < 0.40) {
+    const cfg = this.cfg();
+    if (this.score >= cfg.narrowScore && r < 0.40) {
       this.setWall("narrow", 1.0);
-    } else if (this.score >= 800 && r < 0.40) {
+    } else if (this.score >= cfg.zigzagScore && r < 0.40) {
       this.setWall("zigzag", 1.0);
-    } else if (this.score >= this.cfg().narrowingScore && r < 0.50) {
+    } else if (this.score >= cfg.narrowingScore && r < 0.50) {
       this.setWall("pinch", 1.0);
     } else {
       this.setWall("none", 0);
@@ -4397,7 +4439,7 @@ export class Game {
         : all;
 
     if (valid.length === 0) return null;
-    return valid[Math.floor(Math.random() * valid.length)]!;
+    return valid[Math.floor(this.rng() * valid.length)]!;
   }
 
   // ----- end wave system -----
@@ -4496,11 +4538,15 @@ export class Game {
     // during the brief foreground restore from the app switcher. If we
     // accept that reading we end up locked to a tiny play area until the
     // next manual resize. Bail out if the canvas reports a width well
-    // under the document width — the foreground hook will retry across
-    // the next animation frames.
-    const docW = Math.max(window.innerWidth || 0, document.documentElement?.clientWidth || 0);
-    if (docW > 1 && cssW < docW * 0.5) {
-      return;
+    // under its own parent's width (which represents the laid-out CSS
+    // box, not the full document — desktop browsers have a much wider
+    // document than #app's 540px clamp).
+    const parent = this.canvas.parentElement;
+    if (parent) {
+      const parentW = parent.getBoundingClientRect().width;
+      if (parentW > 1 && cssW < parentW * 0.5) {
+        return;
+      }
     }
 
     this.canvas.width = Math.round(cssW * dpr);

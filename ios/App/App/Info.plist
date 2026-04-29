@@ -48,6 +48,12 @@
 		<string>UIInterfaceOrientationPortrait</string>
 		<string>UIInterfaceOrientationPortraitUpsideDown</string>
 	</array>
+	<!-- Opt out of iPad multitasking (Slide Over / Split View) — App Store
+	     review otherwise rejects portrait-only iPad apps for not declaring
+	     all four orientations. Hex Rain's HUD + touchbar layout assumes a
+	     full-screen portrait window. -->
+	<key>UIRequiresFullScreen</key>
+	<true/>
 	<key>UIViewControllerBasedStatusBarAppearance</key>
 	<false/>
 	<key>UIStatusBarHidden</key>

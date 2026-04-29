@@ -113,6 +113,7 @@ const LEADERBOARD_TINTS: Record<string, string> = {
   easy: "#5b8bff",
   medium: "#ffd76b",
   hard: "#ff7a4a",
+  hardcore: "#dc463c",
 };
 for (const [diff, tint] of Object.entries(LEADERBOARD_TINTS)) {
   const file = resolve(outDir, `leaderboard-${diff}.png`);
