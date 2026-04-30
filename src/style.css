@@ -1186,6 +1186,52 @@ body {
   text-transform: uppercase;
 }
 
+/* "Block N Unlocked" banner that appears on the challenge complete
+   screen the moment a 3-of-5 threshold is crossed. */
+.challenge-unlock-banner {
+  margin: 4px 0 0;
+  padding: 6px 14px;
+  font-size: 13px;
+  letter-spacing: 0.22em;
+  font-weight: 800;
+  text-transform: uppercase;
+  color: #ffd86b;
+  border: 1px solid rgba(255, 200, 100, 0.7);
+  border-radius: 999px;
+  background: rgba(255, 200, 100, 0.12);
+  text-shadow: 0 0 14px rgba(255, 200, 90, 0.55);
+  animation: unlock-banner-pop 480ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+@keyframes unlock-banner-pop {
+  0% { transform: scale(0.6); opacity: 0; }
+  60% { transform: scale(1.08); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+/* "NEW" pill on cards in a freshly-unlocked block, until the player
+   attempts any challenge in that block. */
+.challenge-card-new {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  padding: 2px 6px;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.18em;
+  color: #0d0f1c;
+  background: #ffd86b;
+  border-radius: 4px;
+  box-shadow: 0 0 10px rgba(255, 200, 90, 0.5);
+}
+
+/* Don't double up the "NEW" pill with the completion check. The check
+   means the card has been played, which clears the fresh-block state
+   on the next render anyway. */
+.challenge-card.completed .challenge-card-new {
+  display: none;
+}
+
 /* Big percentage on the challenge game-over screen. */
 .challenge-pct {
   font-size: 78px;
@@ -1221,6 +1267,105 @@ body {
 .challenge-card-star.earned {
   color: #ffd86b;
   text-shadow: 0 0 6px rgba(255, 200, 90, 0.7);
+}
+
+/* Challenge complete: progress-bar from 0 → max(score, 3★) showing
+   the player's score relative to the three star thresholds. The fill
+   animates in lockstep with the star reveals so each earned star pops
+   the instant the fill crosses its tier tick. */
+.challenge-score-bar {
+  width: min(360px, 84%);
+  margin: 0 0 -2px;
+  /* Top padding leaves room for the tier star + score labels that sit
+     above the track; bottom padding leaves room for the player-score
+     marker label below. */
+  padding: 22px 0 24px;
+}
+
+.bar-track {
+  position: relative;
+  height: 10px;
+  background: rgba(31, 36, 64, 0.55);
+  border: 1px solid rgba(91, 139, 255, 0.25);
+  border-radius: 999px;
+  overflow: visible;
+}
+
+.bar-fill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: 0;
+  background: linear-gradient(90deg, rgba(255, 200, 100, 0.85), rgba(255, 230, 150, 0.95));
+  border-radius: 999px;
+  box-shadow: 0 0 10px rgba(255, 200, 90, 0.5);
+}
+
+/* Tier ticks above the track: a small star + the score it represents. */
+.bar-tier {
+  position: absolute;
+  top: 50%;
+  width: 2px;
+  height: 18px;
+  background: rgba(170, 196, 255, 0.55);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.bar-tier-star {
+  position: absolute;
+  bottom: 110%;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 12px;
+  color: #ffd86b;
+  text-shadow: 0 0 6px rgba(255, 200, 90, 0.55);
+}
+
+.bar-tier-score {
+  position: absolute;
+  bottom: 220%;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  color: #aab4dc;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Player-score marker beneath the track — rides the fill end. */
+.bar-marker {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 2px;
+  height: 18px;
+  background: #fff5d3;
+  transform: translate(-50%, -50%);
+  opacity: 0;
+  pointer-events: none;
+}
+
+.bar-marker.show {
+  opacity: 1;
+}
+
+.bar-marker-score {
+  position: absolute;
+  top: 110%;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 1px 6px;
+  background: rgba(13, 15, 28, 0.85);
+  border: 1px solid rgba(255, 230, 150, 0.6);
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  color: #fff5d3;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 /* Challenge complete: large stars that pop in one at a time. */

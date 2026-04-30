@@ -1440,6 +1440,17 @@ export class Game {
       const blockNum = idx + 1;
       const unlocked = progress.unlockedBlocks.includes(blockNum);
       const completedInBlock = arr.filter((c) => progress.completed.includes(c.id)).length;
+      // A block is "fresh" once unlocked until the player attempts any
+      // challenge inside it. While fresh, every card in the block wears
+      // a NEW pill so the unlock celebration carries from the complete
+      // screen back into the menu.
+      const blockHasAttempt = arr.some(
+        (cc) =>
+          (progress.bestPct[cc.id] ?? 0) > 0 ||
+          (progress.best[cc.id] ?? 0) > 0 ||
+          progress.completed.includes(cc.id),
+      );
+      const blockIsFresh = unlocked && !blockHasAttempt;
       const cards = arr.map((c) => {
         const best = progress.best[c.id] ?? 0;
         const bestPct = progress.bestPct[c.id] ?? 0;
@@ -1462,6 +1473,7 @@ export class Game {
           hexes.push(`<span class="challenge-card-hex" style="background:${tint};"></span>`);
         }
         const check = done ? '<span class="check">✓</span>' : "";
+        const newBadge = blockIsFresh ? '<span class="challenge-card-new">NEW</span>' : "";
         const starsHtml = unlocked && attempted
           ? `<div class="challenge-card-stars">${
               [0, 1, 2].map((i) =>
@@ -1477,6 +1489,7 @@ export class Game {
             ${starsHtml}
             <span class="challenge-card-best">${bestScoreText} ${pctText}</span>
             ${check}
+            ${newBadge}
           </button>
         `;
       }).join("");
@@ -1565,7 +1578,7 @@ export class Game {
     this.overlay.classList.remove("hidden");
   }
 
-  private renderChallengeComplete(): void {
+  private renderChallengeComplete(newlyUnlocked: number[] = []): void {
     const def = this.activeChallenge;
     if (!def) return;
     const progress = loadChallengeProgress();
@@ -1580,13 +1593,53 @@ export class Game {
         `<span class="challenge-star${filled ? " earned" : " empty"}" data-star-idx="${i}">★</span>`,
       );
     }
+    // Score-bar markup: a track from 0 to max(score, 3★) + 5% headroom,
+    // with three tier ticks (1★ / 2★ / 3★) and a fill that animates from
+    // 0 → score so the player can see how close they came to the next
+    // tier. The bar fill drives the star-pop timing — each earned star
+    // pops the moment the fill reaches its threshold.
+    const tiers = [thresholds.one, thresholds.two, thresholds.three];
+    const barMax = Math.max(this.score, thresholds.three) * 1.05;
+    const fillPct = Math.min(100, (this.score / barMax) * 100);
+    const tierPcts = tiers.map((t) => Math.min(100, (t / barMax) * 100));
+    const tierMarkers = tiers
+      .map((t, i) => {
+        const pct = tierPcts[i]!.toFixed(2);
+        return `
+          <div class="bar-tier" style="left:${pct}%;">
+            <span class="bar-tier-star">★</span>
+            <span class="bar-tier-score">${t}</span>
+          </div>
+        `;
+      })
+      .join("");
+    // "Block N Unlocked" banner if this completion crossed a 3-of-5
+    // threshold. Stacked in case a multi-block jump ever happens.
+    const unlockBanner = newlyUnlocked.length > 0
+      ? newlyUnlocked
+          .map(
+            (b) =>
+              `<p class="challenge-unlock-banner">Block ${b} Unlocked</p>`,
+          )
+          .join("")
+      : "";
     this.overlay.innerHTML = `
       <div class="challenge-intro">
         <p class="challenge-complete-banner">Challenge Complete</p>
         <span class="id">${def.id}</span>
         <h1>${escapeHtml(def.name)}</h1>
         <div class="challenge-stars-big">${starHtml.join("")}</div>
-        <p class="tagline">Score ${this.score}${newBest ? " · NEW BEST" : ` · Best ${best}`}</p>
+        <div class="challenge-score-bar">
+          <div class="bar-track">
+            <div class="bar-fill"></div>
+            ${tierMarkers}
+            <div class="bar-marker" style="left:${fillPct.toFixed(2)}%;">
+              <span class="bar-marker-score">${this.score}</span>
+            </div>
+          </div>
+        </div>
+        <p class="tagline">${newBest ? "NEW BEST" : `Best ${best}`}</p>
+        ${unlockBanner}
         <button type="button" class="play-btn" data-action="play">PLAY AGAIN</button>
         <button type="button" class="challenge-back" data-action="challenge-back">Back</button>
         <button type="button" class="challenge-back" data-action="challenge-menu">Main menu</button>
@@ -1596,18 +1649,40 @@ export class Game {
     this.setScoreVisible(false);
     this.setHudVisible(false);
 
-    // Stagger star pop-in: each earned star fades + scales in with an
-    // impact "POP" sound. Empty stars appear quietly at the end.
+    // Animation timing: bar fills 0 → fillPct over BAR_DURATION_MS. Each
+    // earned star pops the instant the fill visually crosses its tier
+    // tick (so the bar and star reveals stay locked together). Unearned
+    // stars pop dimly at the very end so the row stays visible.
+    const fillEl = this.overlay.querySelector<HTMLDivElement>(".bar-fill");
+    const markerEl = this.overlay.querySelector<HTMLDivElement>(".bar-marker");
+    const BAR_DURATION_MS = 1100;
+    const POST_BAR_DELAY_MS = 260;
+    if (fillEl && markerEl) {
+      // Start at 0 and let CSS transition push to the final width on the
+      // next frame. The marker rides along on the same transition.
+      fillEl.style.transition = `width ${BAR_DURATION_MS}ms cubic-bezier(0.22, 0.61, 0.36, 1)`;
+      markerEl.style.transition = `left ${BAR_DURATION_MS}ms cubic-bezier(0.22, 0.61, 0.36, 1), opacity 200ms ease-out`;
+      requestAnimationFrame(() => {
+        fillEl.style.width = `${fillPct.toFixed(2)}%`;
+        markerEl.classList.add("show");
+      });
+    }
     const starEls = Array.from(
       this.overlay.querySelectorAll<HTMLSpanElement>(".challenge-star"),
     );
-    const STAR_STEP_MS = 280;
-    const FIRST_STAR_DELAY_MS = 320;
     starEls.forEach((el, i) => {
+      const threshold = tiers[i]!;
+      const reachedAt = this.score >= threshold
+        // Fill animates linearly with eased curve, but for tier-pop
+        // timing we use a simple linear approximation: time to threshold
+        // = (threshold / score) × duration. Close enough that the pop
+        // visually coincides with the tick crossing.
+        ? Math.min(BAR_DURATION_MS, (threshold / Math.max(1, this.score)) * BAR_DURATION_MS)
+        : BAR_DURATION_MS + POST_BAR_DELAY_MS;
       window.setTimeout(() => {
         el.classList.add("pop");
         if (el.classList.contains("earned")) playSfx("impact");
-      }, FIRST_STAR_DELAY_MS + i * STAR_STEP_MS);
+      }, reachedAt);
     });
   }
 
@@ -1931,7 +2006,10 @@ export class Game {
       this.applyMovementInput();
       Engine.update(this.engine, Math.min(dt * 1000, 1000 / 30));
       this.player.clampToRail(this.playerY);
-      this.player.clampBoundsX(this.currentRailLeft(), this.currentRailRight());
+      {
+        const r = this.playerRailBounds();
+        this.player.clampBoundsX(r.left, r.right);
+      }
       this.player.update(dt);
       return;
     }
@@ -2098,7 +2176,10 @@ export class Game {
     // never extends past the board bottom — and to the (possibly pinched)
     // side rails.
     this.player.clampToRail(this.playerY);
-    this.player.clampBoundsX(this.currentRailLeft(this.playerY), this.currentRailRight(this.playerY));
+    {
+      const r = this.playerRailBounds();
+      this.player.clampBoundsX(r.left, r.right);
+    }
 
     this.player.update(dt);
 
@@ -2449,11 +2530,19 @@ export class Game {
     if (this.slideTarget !== null) {
       const halfBoundsW =
         (this.player.body.bounds.max.x - this.player.body.bounds.min.x) / 2;
-      const railLeft = this.currentRailLeft(this.playerY);
-      const railRight = this.currentRailRight(this.playerY);
-      const railCenter = (railLeft + railRight) / 2;
-      const usableHalfWidth = Math.max(0, (railRight - railLeft) / 2 - halfBoundsW);
-      const targetX = railCenter + this.slideTarget * usableHalfWidth;
+      // Map slider position against the BOARD centre, not the rail centre.
+      // Zigzag walls translate the corridor laterally with the wave, so
+      // referencing the rail meant a stationary slider thumb would still
+      // drag the player back and forth as the corridor scrolled. The
+      // board centre is fixed; clampBoundsX afterwards still stops the
+      // player at any wall it overshoots.
+      const boardCenter = this.boardOriginX + this.boardWidth / 2;
+      const usableHalfWidth = Math.max(0, this.boardWidth / 2 - halfBoundsW);
+      const desiredX = boardCenter + this.slideTarget * usableHalfWidth;
+      const { left: railLeft, right: railRight } = this.playerRailBounds();
+      const minTarget = railLeft + halfBoundsW;
+      const maxTarget = railRight - halfBoundsW;
+      const targetX = Math.max(minTarget, Math.min(maxTarget, desiredX));
       this.player.setX(targetX);
     } else {
       const wantLeft = this.holds.left.active;
@@ -3898,9 +3987,14 @@ export class Game {
       "rgba(120, 255, 170, 0.95)",
     );
 
+    const beforeUnlocked = new Set(loadChallengeProgress().unlockedBlocks);
     const thresholds = computeStarThresholds(def);
     const stars = awardStars(this.score, thresholds);
     const progress = saveChallengeCompletion(def.id, this.score, stars);
+    // Newly-unlocked blocks (only computed once, when the save flips the
+    // 3-of-5 threshold over). Forwarded to the complete screen for the
+    // "BLOCK N UNLOCKED" celebration banner.
+    const newlyUnlocked = progress.unlockedBlocks.filter((b) => !beforeUnlocked.has(b));
     // Block completion → achievement.
     const block = def.block;
     const allInBlockDone = CHALLENGES
@@ -3921,7 +4015,7 @@ export class Game {
     this.state = "challengeComplete";
     this.setPauseButtonVisible(false);
     stopMusic();
-    this.renderChallengeComplete();
+    this.renderChallengeComplete(newlyUnlocked);
   }
 
   // Called from death path to bank a partial-run best score + best-pct.
@@ -4113,6 +4207,36 @@ export class Game {
   }
   currentRailRight(yWorld?: number): number {
     return this.boardOriginX + this.boardWidth - this.wallInsetAt(yWorld).right;
+  }
+
+  // Most restrictive rail bounds across the player's vertical extent.
+  // Critical for zigzag, where the wall's sine bulge at one y can be
+  // tighter than at playerY — sampling only at playerY would let the
+  // wall visually push the player's body even though the bottom rail
+  // looks clear (or vice versa). Pinch / narrow are y-independent so
+  // this collapses to a single sample for them.
+  private playerRailBounds(): { left: number; right: number } {
+    const top = this.player.body.bounds.min.y;
+    const bot = Math.max(top, this.player.body.bounds.max.y);
+    if (this.wall.kind !== "zigzag") {
+      const inset = this.wallInsetAt(this.playerY);
+      return {
+        left: this.boardOriginX + inset.left,
+        right: this.boardOriginX + this.boardWidth - inset.right,
+      };
+    }
+    const STEPS = 5;
+    let left = -Infinity;
+    let right = Infinity;
+    for (let i = 0; i <= STEPS; i++) {
+      const y = top + ((bot - top) * i) / STEPS;
+      const inset = this.wallInsetAt(y);
+      const l = this.boardOriginX + inset.left;
+      const r = this.boardOriginX + this.boardWidth - inset.right;
+      if (l > left) left = l;
+      if (r < right) right = r;
+    }
+    return { left, right };
   }
 
   // Single source of truth for how far the active wall reaches in from

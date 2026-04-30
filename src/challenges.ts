@@ -65,13 +65,13 @@ export const CHALLENGES: ChallengeDef[] = [
       "size=1-2, rate=1.0, speed=1.0, count=6, pct=normal:75,coin:25",
       "size=2, rate=0.85, speed=1.05, count=7, pct=normal:65,coin:35",
       "size=1, rate=0.25, speed=1.05, count=14",                         // first rain
-      "size=2-3, rate=0.8, speed=1.1, count=8, pct=normal:65,coin:35",
+      "size=2-3, rate=0.8, speed=1.1, count=8, pct=normal:60,sticky:10,coin:30",   // single heal sprinkle
       "size=2, rate=0.75, speed=1.15, count=9, pct=normal:70,coin:30",
       "size=1, rate=0.22, speed=1.15, count=16",                         // rain
       "size=2-3, rate=0.7, speed=1.2, count=10, pct=normal:65,coin:35",
       "size=3, rate=0.7, speed=1.25, count=10, pct=normal:70,coin:30",
       "size=1, rate=0.2, speed=1.25, count=18",                          // bigger rain
-      "size=2-3, rate=0.65, speed=1.3, count=11, pct=normal:70,coin:30",
+      "size=2-3, rate=0.65, speed=1.3, count=11, pct=normal:60,sticky:10,coin:30",
     ],
   },
   {
@@ -82,13 +82,13 @@ export const CHALLENGES: ChallengeDef[] = [
       "size=2-3, rate=0.8, speed=1.15, count=8, pct=normal:65,coin:35",
       "size=1, rate=0.2, speed=1.2, count=16",
       "count=0, slotRate=0.55, speed=1.15, 130,230,330,430,530,000,330,230",
-      "size=2-3, rate=0.7, speed=1.25, count=10, pct=normal:65,coin:35",
+      "size=2-3, rate=0.7, speed=1.25, count=10, pct=normal:60,sticky:10,coin:30",  // mid heal
       "size=1, rate=0.18, speed=1.3, count=20",                          // dense
       "size=3, rate=0.65, speed=1.3, count=11, pct=normal:65,coin:35",
       "size=1, rate=0.18, speed=1.35, count=22",
       "size=3-4, rate=0.6, speed=1.4, count=12, pct=normal:65,coin:35",
       "size=1, rate=0.16, speed=1.45, count=24",                         // finale rain
-      "size=3, rate=0.55, speed=1.5, count=13, pct=normal:70,coin:30",
+      "size=3, rate=0.55, speed=1.5, count=13, pct=normal:60,sticky:10,coin:30",  // late heal
     ],
   },
   {
@@ -100,11 +100,11 @@ export const CHALLENGES: ChallengeDef[] = [
       "size=3, rate=0.8, speed=1.15, count=9, pct=normal:55,coin:30,slow:15",   // slow intro
       "count=0, slotRate=0.55, speed=1.15, 230,330,430,000,330,230,430,330",
       "size=1, rate=0.2, speed=1.2, count=17",
-      "size=3, rate=0.75, speed=1.25, count=10, pct=normal:50,slow:20,coin:30",
+      "size=3, rate=0.75, speed=1.25, count=10, pct=normal:45,slow:20,sticky:10,coin:25",   // mid heal
       "size=1, rate=0.18, speed=1.25, count=18",
       "size=3-4, rate=0.7, speed=1.3, count=11, pct=normal:65,coin:35",
       "size=1, rate=0.18, speed=1.3, count=20",                          // breath of rain
-      "size=3, rate=0.65, speed=1.35, count=12, pct=normal:50,slow:20,coin:30",
+      "size=3, rate=0.65, speed=1.35, count=12, pct=normal:45,slow:20,sticky:10,coin:25",   // late heal
       "count=0, slotRate=0.5, speed=1.35, 230,330,430,000,330,230,430,000,330,430",
       "size=1, rate=0.16, speed=1.45, count=24",
     ],
