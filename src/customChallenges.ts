@@ -312,35 +312,53 @@ export function saveCustomChallengeRun(
 // or no wave actually does anything (count > 0, slots, or dur+rate).
 // Returns a list of human-readable errors — empty array means OK.
 export function validateCustomChallenge(c: CustomChallenge): string[] {
-  const errors: string[] = [];
-  if (!c.name.trim()) errors.push("Name cannot be empty.");
+  return [
+    ...validateName(c),
+    ...validateWaveCount(c),
+    ...validateWaveLines(c),
+  ];
+}
+
+function validateName(c: CustomChallenge): string[] {
+  return c.name.trim() ? [] : ["Name cannot be empty."];
+}
+
+function validateWaveCount(c: CustomChallenge): string[] {
   if (!Array.isArray(c.waves) || c.waves.length === 0) {
-    errors.push("Challenge needs at least one wave.");
-    return errors;
+    return ["Challenge needs at least one wave."];
   }
   if (c.waves.length > MAX_WAVES_PER_CUSTOM) {
-    errors.push(`Too many waves (max ${MAX_WAVES_PER_CUSTOM}).`);
+    return [`Too many waves (max ${MAX_WAVES_PER_CUSTOM}).`];
   }
+  return [];
+}
+
+function validateWaveLines(c: CustomChallenge): string[] {
+  if (!Array.isArray(c.waves) || c.waves.length === 0) return [];
+  const errors: string[] = [];
   for (let i = 0; i < c.waves.length; i++) {
-    const line = c.waves[i]!;
-    try {
-      const parsed = parseWaveLine(line);
-      const hasCount = parsed.countCap !== null && parsed.countCap > 0;
-      const hasSlots = parsed.slots.length > 0;
-      const probDisabledByZeroCount = parsed.countCap === 0;
-      const hasDur =
-        parsed.durOverride !== null &&
-        parsed.durOverride > 0 &&
-        parsed.spawnInterval > 0 &&
-        !probDisabledByZeroCount;
-      if (!hasCount && !hasSlots && !hasDur) {
-        errors.push(`Wave ${i + 1}: wave does nothing.`);
-      }
-    } catch (e) {
-      errors.push(`Wave ${i + 1}: ${(e as Error).message}`);
-    }
+    const err = validateOneWaveLine(c.waves[i]!);
+    if (err) errors.push(`Wave ${i + 1}: ${err}`);
   }
   return errors;
+}
+
+function validateOneWaveLine(line: string): string | null {
+  let parsed;
+  try {
+    parsed = parseWaveLine(line);
+  } catch (e) {
+    return (e as Error).message;
+  }
+  const hasCount = parsed.countCap !== null && parsed.countCap > 0;
+  const hasSlots = parsed.slots.length > 0;
+  const probDisabledByZeroCount = parsed.countCap === 0;
+  const hasDur =
+    parsed.durOverride !== null &&
+    parsed.durOverride > 0 &&
+    parsed.spawnInterval > 0 &&
+    !probDisabledByZeroCount;
+  return hasCount || hasSlots || hasDur ? null : "wave does nothing.";
 }
 
 // Stamp the publish state on the author's local record after a publish
