@@ -1,5 +1,6 @@
 import { Bodies, Body } from "matter-js";
 import { pathHex } from "./hex";
+import { debrisPalette } from "./palettes";
 import type { ClusterKind } from "./types";
 
 const DEBRIS_LIFETIME = 1.4; // seconds
@@ -84,17 +85,4 @@ export class DebrisHex {
   }
 }
 
-function debrisPalette(kind: ClusterKind): { fill: string; accent: string; stroke: string } {
-  switch (kind) {
-    case "sticky":
-      return { fill: "#d23a8a", accent: "#ff8ad1", stroke: "#ffd6ee" };
-    case "slow":
-      return { fill: "#d3a000", accent: "#ffe46b", stroke: "#fff5b6" };
-    case "fast":
-      return { fill: "#1ea35e", accent: "#92ffb6", stroke: "#d4ffd6" };
-    case "coin":
-      return { fill: "#d97a18", accent: "#ffce6b", stroke: "#fff0c9" };
-    default:
-      return { fill: "#5b8bff", accent: "#aac4ff", stroke: "#1c2348" };
-  }
-}
+// debrisPalette moved to src/palettes.ts in Phase 1.3.
