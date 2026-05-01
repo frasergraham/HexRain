@@ -105,6 +105,8 @@ import { escapeHtml } from "./ui/escape";
 import { difficultyTint, drawBlockIcon } from "./ui/components/blockIcon";
 import { BlocksGuide } from "./ui/screens/blocksGuide";
 import { UnlockShop } from "./ui/screens/unlockShop";
+import { ChallengeIntro } from "./ui/screens/challengeIntro";
+import { ChallengeComplete } from "./ui/screens/challengeComplete";
 
 // Build-time feature flag: while the IAP unlock flow is being verified
 // on TestFlight, set VITE_EDITOR_UNLOCKED=1 in .env.local (or any vite
@@ -5410,25 +5412,13 @@ export class Game {
   private renderChallengeIntro(): void {
     const def = this.activeChallenge;
     if (!def) return;
-    const progress = loadChallengeProgress();
-    const best = progress.best[def.id] ?? 0;
-    const tint = difficultyTint(def.difficulty);
-    const hexes: string[] = [];
-    for (let i = 0; i < def.difficulty; i++) {
-      hexes.push(
-        `<span class="challenge-card-hex" style="background:${tint}; width:14px; height:16px;"></span>`,
-      );
-    }
-    this.overlay.innerHTML = `
-      <div class="challenge-intro">
-        <span class="id">${def.id}</span>
-        <h1>${escapeHtml(def.name)}</h1>
-        <div class="challenge-card-hexes" style="gap:4px;">${hexes.join("")}</div>
-        <p class="meta">${def.waves.length} waves${best > 0 ? ` · Best: ${best}` : ""}</p>
-        <button type="button" class="play-btn" data-action="challenge-go">START</button>
-        <button type="button" class="challenge-back" data-action="challenge-back">← Back</button>
-      </div>
-    `;
+    this.overlay.innerHTML = ChallengeIntro.render({
+      id: def.id,
+      name: def.name,
+      difficulty: def.difficulty,
+      waveCount: def.waves.length,
+      best: loadChallengeProgress().best[def.id] ?? 0,
+    });
     this.overlay.classList.remove("hidden");
   }
 
@@ -5439,111 +5429,28 @@ export class Game {
     const customRecord = isCustom ? getCustomChallenge(def.id) : undefined;
     const progress = loadChallengeProgress();
     const best = isCustom ? (customRecord?.best ?? 0) : (progress.best[def.id] ?? 0);
-    const newBest = this.score >= best;
     const thresholds = isCustom && customRecord
       ? customRecord.stars
       : computeStarThresholds(def);
-    const earned = awardStars(this.score, thresholds);
-    const starHtml: string[] = [];
-    for (let i = 0; i < 3; i++) {
-      const filled = i < earned;
-      starHtml.push(
-        `<span class="challenge-star${filled ? " earned" : " empty"}" data-star-idx="${i}">★</span>`,
-      );
-    }
-    // Score-bar markup: a track from 0 to max(score, 3★) + 5% headroom,
-    // with three tier ticks (1★ / 2★ / 3★) and a fill that animates from
-    // 0 → score so the player can see how close they came to the next
-    // tier. The bar fill drives the star-pop timing — each earned star
-    // pops the moment the fill reaches its threshold.
-    const tiers = [thresholds.one, thresholds.two, thresholds.three];
-    const barMax = Math.max(this.score, thresholds.three) * 1.05;
-    const fillPct = Math.min(100, (this.score / barMax) * 100);
-    const tierPcts = tiers.map((t) => Math.min(100, (t / barMax) * 100));
-    const tierMarkers = tiers
-      .map((t, i) => {
-        const pct = tierPcts[i]!.toFixed(2);
-        return `
-          <div class="bar-tier" style="left:${pct}%;">
-            <span class="bar-tier-star">★</span>
-            <span class="bar-tier-score">${t}</span>
-          </div>
-        `;
-      })
-      .join("");
-    // "Block N Unlocked" banner if this completion crossed a 3-of-5
-    // threshold. Stacked in case a multi-block jump ever happens.
-    const unlockBanner = newlyUnlocked.length > 0
-      ? newlyUnlocked
-          .map(
-            (b) =>
-              `<p class="challenge-unlock-banner">Block ${b} Unlocked</p>`,
-          )
-          .join("")
-      : "";
-    const idLabel = isCustom ? "CUSTOM" : def.id;
-    this.overlay.innerHTML = `
-      <div class="challenge-intro">
-        <p class="challenge-complete-banner">Challenge Complete</p>
-        <span class="id">${escapeHtml(idLabel)}</span>
-        <h1>${escapeHtml(def.name)}</h1>
-        <div class="challenge-stars-big">${starHtml.join("")}</div>
-        <div class="challenge-score-bar">
-          <div class="bar-track">
-            <div class="bar-fill"></div>
-            ${tierMarkers}
-            <div class="bar-marker" style="left:${fillPct.toFixed(2)}%;">
-              <span class="bar-marker-score">${this.score}</span>
-            </div>
-          </div>
-        </div>
-        <p class="tagline">${newBest ? "NEW BEST" : `Best ${best}`}</p>
-        ${unlockBanner}
-        <button type="button" class="play-btn" data-action="play">PLAY AGAIN</button>
-        <button type="button" class="challenge-back" data-action="challenge-back">Back</button>
-        <button type="button" class="challenge-back" data-action="challenge-menu">Main menu</button>
-      </div>
-    `;
+    const props = {
+      idLabel: isCustom ? "CUSTOM" : def.id,
+      name: def.name,
+      score: this.score,
+      best,
+      isNewBest: this.score >= best,
+      thresholds,
+      earnedStars: awardStars(this.score, thresholds),
+      newlyUnlocked,
+      onStarPop: (_i: number, earned: boolean) => {
+        if (earned) playSfx("impact");
+      },
+    };
+    this.overlay.innerHTML = ChallengeComplete.render(props);
     this.overlay.classList.remove("hidden");
     this.setScoreVisible(false);
     this.setHudVisible(false);
     this.setInPlay(false);
-
-    // Animation timing: bar fills 0 → fillPct over BAR_DURATION_MS. Each
-    // earned star pops the instant the fill visually crosses its tier
-    // tick (so the bar and star reveals stay locked together). Unearned
-    // stars pop dimly at the very end so the row stays visible.
-    const fillEl = this.overlay.querySelector<HTMLDivElement>(".bar-fill");
-    const markerEl = this.overlay.querySelector<HTMLDivElement>(".bar-marker");
-    const BAR_DURATION_MS = 1100;
-    const POST_BAR_DELAY_MS = 260;
-    if (fillEl && markerEl) {
-      // Start at 0 and let CSS transition push to the final width on the
-      // next frame. The marker rides along on the same transition.
-      fillEl.style.transition = `width ${BAR_DURATION_MS}ms cubic-bezier(0.22, 0.61, 0.36, 1)`;
-      markerEl.style.transition = `left ${BAR_DURATION_MS}ms cubic-bezier(0.22, 0.61, 0.36, 1), opacity 200ms ease-out`;
-      requestAnimationFrame(() => {
-        fillEl.style.width = `${fillPct.toFixed(2)}%`;
-        markerEl.classList.add("show");
-      });
-    }
-    const starEls = Array.from(
-      this.overlay.querySelectorAll<HTMLSpanElement>(".challenge-star"),
-    );
-    starEls.forEach((el, i) => {
-      const threshold = tiers[i]!;
-      const reachedAt = this.score >= threshold
-        // Fill animates linearly with eased curve, but for tier-pop
-        // timing we use a simple linear approximation: time to threshold
-        // = (threshold / score) × duration. Close enough that the pop
-        // visually coincides with the tick crossing.
-        ? Math.min(BAR_DURATION_MS, (threshold / Math.max(1, this.score)) * BAR_DURATION_MS)
-        : BAR_DURATION_MS + POST_BAR_DELAY_MS;
-      window.setTimeout(() => {
-        el.classList.add("pop");
-        if (el.classList.contains("earned")) playSfx("impact");
-      }, reachedAt);
-    });
+    ChallengeComplete.bind?.(this.overlay, props);
   }
 
   // TEMP — see EDITOR_TEMP_UNLOCKED_ON_IOS at the top of this file.
