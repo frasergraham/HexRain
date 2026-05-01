@@ -22,7 +22,7 @@ import {
   pathHex,
   SQRT3,
 } from "./hex";
-import { bindCanvasSlide, bindInput, bindSlider, isTouchDevice } from "./input";
+import { bindCanvasSlide, bindInput, bindSlider, isTouchDevice, type SliderHandle } from "./input";
 import {
   isMusicOn,
   isSfxOn,
@@ -63,6 +63,7 @@ import {
 } from "./customChallenges";
 import { drawWavePreview } from "./wavePreview";
 import { WAVE_PRESETS, getPreset, presetDefaults, presetMix } from "./wavePresets";
+import { slotKindToPrefix } from "./waveDsl";
 import {
   getUnlockAllProduct,
   isStoreKitAvailable,
@@ -72,6 +73,13 @@ import {
   type ProductInfo,
 } from "./storeKit";
 import { hashSeed, mulberry32, type Random } from "./rng";
+
+// TEMP: until the IAP unlock flow is verified end-to-end on TestFlight,
+// the Challenge Editor is auto-unlocked on iOS so we can keep iterating
+// without needing a sandbox-purchase round-trip. Revert this constant
+// to `false` (or delete the const + restore the original `purchasedUnlock
+// || debugEnabled` checks) before shipping the editor publicly.
+const EDITOR_TEMP_UNLOCKED_ON_IOS = true;
 
 // Score-club achievements are difficulty-gated: easy earns none, medium
 // earns the standard ladder, and hard earns the Elite ladder. The
@@ -265,6 +273,15 @@ const BASE_FALL_SPEED = 1.6; // initial downward velocity for spawned clusters (
 const SPEED_RAMP = 0.04; // px/ms per score
 const MAX_FALL_SPEED = 5.5;
 
+// Challenge clusters maintain a constant fall velocity (gravity is
+// re-cancelled each frame in update()) so `speed=` in the wave DSL is
+// the literal fall rate. CHALLENGE_BASE_FALL_SPEED is tuned so that
+// `speed=1.0` feels close to gravity-driven endless mode (which lands
+// near ~12 px/step after the first half-second). speed=0.5 reads as
+// clearly slow, speed=3 as clearly fast.
+const CHALLENGE_BASE_FALL_SPEED = 12;
+const CHALLENGE_MAX_FALL_SPEED = 60;
+
 const SPAWN_INTERVAL_START = 1.6; // seconds
 const SPAWN_INTERVAL_MIN = 0.7;
 const SPAWN_INTERVAL_RAMP = 0.03;
@@ -430,6 +447,7 @@ export class Game {
   private overlay: HTMLElement;
   private menuOverlayHtml: string = "";
   private touchbar: HTMLElement;
+  private sliderHandle: SliderHandle | null = null;
   private scoreEl: HTMLElement;
   private bestEl: HTMLElement;
   private pauseBtn: HTMLElement | null;
@@ -501,7 +519,7 @@ export class Game {
   // overlay-on-overlay modal rendering.
   private editingCustom: CustomChallenge | null = null;
   private editorSelectedWaveIdx = 0;
-  private editorDialog: "wave" | "settings" | null = null;
+  private editorDialog: "wave" | "customWave" | "settings" | null = null;
   private editorDialogWaveIdx: number | null = null;
   // Wave-dialog transient state. `isNewWave=true` means the OK action
   // appends to the wave list; otherwise it replaces at waveIdx. The
@@ -517,8 +535,33 @@ export class Game {
   // wiggle. Values are integer % per kind, summing to 100. Source of
   // truth for the final pct= token in applyWaveDialog.
   private editorDialogPctValues: Partial<Record<ClusterKind, number>> = {
-    normal: 100, sticky: 0, slow: 0, fast: 0, coin: 0, shield: 0, drone: 0,
+    normal: 100, sticky: 0, slow: 0, fast: 0, coin: 0, shield: 0, drone: 0, tiny: 0, big: 0,
   };
+  // Custom-wave editor state. Distinct from the regular dialog: a
+  // 30-slot timeline (bottom = first), a selected kind for placement,
+  // plus a rate + walls control. The DSL compose runs on OK and
+  // produces a slot-only wave (count=0, slot tokens with kind prefix).
+  private editorCustomWaveSlots: Array<{
+    kind: ClusterKind;
+    size: number;            // 1-5
+    side: "main" | "left" | "right";
+    col: number;             // 0-9 when side === "main"
+    angleIdx: number;        // 0-6 for main; 7 left; 8 right
+  } | null> = new Array(CUSTOM_WAVE_LEN).fill(null);
+  private editorCustomWaveKind: ClusterKind = "normal";
+  private editorCustomWaveRate = 0.5;       // slotInterval in seconds
+  private editorCustomWaveSpeed = 1.2;      // baseSpeedMul
+  private editorCustomWaveWalls: WallKind = "none";
+  private editorCustomWaveOptionsOpen = false;
+  // How many rows the custom-wave grid currently shows (capped at
+  // CUSTOM_WAVE_LEN). Grows on placement / "Add row" tap; the underlying
+  // slots[] stays length 30 — only the first `visibleRows` are emitted.
+  private editorCustomWaveVisibleRows = 1;
+  // Tap-on-placed-cell opens this picker popup. `cellRect` is the
+  // clicked cell's viewport rect snapped at click time — used by the
+  // post-render pass to anchor the picker beside (or above) the cell.
+  private editorCustomCellPicker: { rowIdx: number; cellRect: DOMRect | null } | null = null;
+
   // Live preview that loops the working wave behind the dialog. Tick
   // re-parses the working line each frame so rate/count/dur/walls/mix
   // changes apply on the fly; only preset picks reset the loop.
@@ -529,6 +572,11 @@ export class Game {
     spawnTimer: number;
     waveTimer: number;
     restartDelay: number;
+    /** Last applied baseSpeedMul. Used so changing speed mid-wave
+     *  rescales the velocity of in-flight clusters too — otherwise
+     *  existing spawns keep falling at the old speed and the change
+     *  appears not to take effect until the next spawn cycle. */
+    lastSpeedMul: number;
   } | null = null;
   private editorDragData: {
     waveIdx: number;
@@ -854,20 +902,20 @@ export class Game {
       );
     }
     if (movePadEl && moveKnobEl) {
-      extraUnbinds.push(
-        bindSlider(movePadEl, moveKnobEl, (value) => {
-          // While paused, ignore slider input entirely. The pad has
-          // pointer-events:none in its disabled state so new touches
-          // don't even fire — but if a touch was already in progress
-          // when pause started, we drop the values here.
-          if (this.state === "paused") return;
-          this.slideTarget = value;
-          if (value !== null) {
-            this.holds.left.active = false;
-            this.holds.right.active = false;
-          }
-        }),
-      );
+      const sliderHandle = bindSlider(movePadEl, moveKnobEl, (value) => {
+        // While paused, ignore slider input entirely. The pad has
+        // pointer-events:none in its disabled state so new touches
+        // don't even fire — but if a touch was already in progress
+        // when pause started, we drop the values here.
+        if (this.state === "paused") return;
+        this.slideTarget = value;
+        if (value !== null) {
+          this.holds.left.active = false;
+          this.holds.right.active = false;
+        }
+      });
+      this.sliderHandle = sliderHandle;
+      extraUnbinds.push(sliderHandle.unbind);
     }
     if (extraUnbinds.length > 0) {
       const baseUnbind = this.unbindInput;
@@ -1005,7 +1053,7 @@ export class Game {
       if (editorBtn) {
         playSfx("click");
         const progress = loadChallengeProgress();
-        if (progress.purchasedUnlock || this.debugEnabled) {
+        if (progress.purchasedUnlock || this.debugEnabled || this.isEditorTempUnlocked()) {
           this.openEditorHome();
         } else {
           this.openUnlockShop();
@@ -1176,12 +1224,121 @@ export class Game {
         this.openNewWaveDialog();
         return;
       }
-      // Editor edit: open a wave's edit dialog.
+      // Editor edit: open the custom-wave (slot-grid) editor.
+      const editorAddCustomBtn = target?.closest('button[data-action="editor-add-custom-wave"]') as HTMLButtonElement | null;
+      if (editorAddCustomBtn && this.editingCustom && this.editingCustom.waves.length < MAX_WAVES_PER_CUSTOM) {
+        playSfx("click");
+        this.openNewCustomWaveDialog();
+        return;
+      }
+      // Editor edit: open a wave's edit dialog. Routes to the custom
+      // editor when the wave is a slot-only pattern (count=0 + slots),
+      // otherwise the regular preset+advanced dialog.
       const editorOpenWaveBtn = target?.closest('button[data-action="editor-open-wave"]') as HTMLButtonElement | null;
       if (editorOpenWaveBtn) {
         playSfx("click");
         const idx = parseInt(editorOpenWaveBtn.dataset.waveIdx ?? "-1", 10);
-        if (Number.isFinite(idx) && idx >= 0) this.openExistingWaveDialog(idx);
+        if (Number.isFinite(idx) && idx >= 0 && this.editingCustom) {
+          const line = this.editingCustom.waves[idx] ?? "";
+          if (this.isCustomShapedWave(line)) this.openExistingCustomWaveDialog(idx);
+          else this.openExistingWaveDialog(idx);
+        }
+        return;
+      }
+      // Custom-wave dialog: select a kind from the palette.
+      const customKindBtn = target?.closest('button[data-action="editor-custom-kind"]') as HTMLButtonElement | null;
+      if (customKindBtn) {
+        playSfx("click");
+        const kind = customKindBtn.dataset.kind as ClusterKind | undefined;
+        if (kind && CUSTOM_WAVE_KINDS.includes(kind)) {
+          this.editorCustomWaveKind = kind;
+          this.renderEditorEdit();
+        }
+        return;
+      }
+      // Custom-wave dialog: add another empty row at the top.
+      const customAddRowBtn = target?.closest('button[data-action="editor-custom-addrow"]') as HTMLButtonElement | null;
+      if (customAddRowBtn && !customAddRowBtn.disabled) {
+        playSfx("click");
+        this.addCustomWaveRow();
+        return;
+      }
+      // Custom-wave dialog: clear a row.
+      const customClearBtn = target?.closest('button[data-action="editor-custom-clear"]') as HTMLButtonElement | null;
+      if (customClearBtn) {
+        playSfx("click");
+        const row = parseInt(customClearBtn.dataset.row ?? "-1", 10);
+        if (Number.isFinite(row) && row >= 0 && row < CUSTOM_WAVE_LEN) {
+          this.editorCustomWaveSlots[row] = null;
+          this.renderEditorEdit();
+        }
+        return;
+      }
+      // Custom-wave dialog: rate stepper.
+      const customRateBtn = target?.closest('button[data-action="editor-custom-rate"]') as HTMLButtonElement | null;
+      if (customRateBtn && !customRateBtn.disabled) {
+        playSfx("click");
+        const delta = parseFloat(customRateBtn.dataset.delta ?? "0");
+        if (Number.isFinite(delta)) this.bumpCustomWaveRate(delta);
+        return;
+      }
+      // Custom-wave dialog: speed stepper.
+      const customSpeedBtn = target?.closest('button[data-action="editor-custom-speed"]') as HTMLButtonElement | null;
+      if (customSpeedBtn && !customSpeedBtn.disabled) {
+        playSfx("click");
+        const delta = parseFloat(customSpeedBtn.dataset.delta ?? "0");
+        if (Number.isFinite(delta)) this.bumpCustomWaveSpeed(delta);
+        return;
+      }
+      // Custom-wave dialog: toggle the OPTIONS collapsible.
+      const customOptionsToggle = target?.closest('button[data-action="editor-custom-options-toggle"]') as HTMLButtonElement | null;
+      if (customOptionsToggle) {
+        playSfx("click");
+        this.editorCustomWaveOptionsOpen = !this.editorCustomWaveOptionsOpen;
+        this.renderEditorEdit();
+        return;
+      }
+      // Custom-wave dialog: walls cycler.
+      const customWallsBtn = target?.closest('button[data-action="editor-custom-walls"]') as HTMLButtonElement | null;
+      if (customWallsBtn) {
+        playSfx("click");
+        const dir = parseInt(customWallsBtn.dataset.dir ?? "0", 10);
+        if (dir !== 0) this.cycleCustomWaveWalls(dir);
+        return;
+      }
+      // Custom-wave dialog: tap a grid cell.
+      const customCellBtn = target?.closest('button[data-action="editor-custom-cell"]') as HTMLButtonElement | null;
+      if (customCellBtn) {
+        playSfx("click");
+        const row = parseInt(customCellBtn.dataset.row ?? "-1", 10);
+        const sideAttr = customCellBtn.dataset.side as "left" | "right" | undefined;
+        const col = sideAttr ? 0 : parseInt(customCellBtn.dataset.col ?? "-1", 10);
+        if (Number.isFinite(row) && row >= 0 && row < CUSTOM_WAVE_LEN) {
+          this.placeCustomWaveCell(row, sideAttr ?? "main", col);
+        }
+        return;
+      }
+      // Cell picker: pick a size.
+      const pickSizeBtn = target?.closest('button[data-action="editor-custom-pick-size"]') as HTMLButtonElement | null;
+      if (pickSizeBtn && this.editorCustomCellPicker) {
+        playSfx("click");
+        const size = parseInt(pickSizeBtn.dataset.size ?? "1", 10);
+        if (Number.isFinite(size)) this.setCustomCellSize(this.editorCustomCellPicker.rowIdx, size);
+        return;
+      }
+      // Cell picker: pick an angle.
+      const pickAngleBtn = target?.closest('button[data-action="editor-custom-pick-angle"]') as HTMLButtonElement | null;
+      if (pickAngleBtn && this.editorCustomCellPicker) {
+        playSfx("click");
+        const angle = parseInt(pickAngleBtn.dataset.angle ?? "0", 10);
+        if (Number.isFinite(angle)) this.setCustomCellAngle(this.editorCustomCellPicker.rowIdx, angle);
+        return;
+      }
+      // Cell picker: close (Done button or backdrop tap).
+      const pickerCloseBtn = target?.closest('[data-action="editor-custom-picker-close"]') as HTMLElement | null;
+      if (pickerCloseBtn) {
+        playSfx("click");
+        this.closeCustomCellPicker();
         return;
       }
       // Wave dialog: pick a preset chip.
@@ -1239,6 +1396,25 @@ export class Game {
         playSfx("click");
         const dir = parseInt(wallsCycle.dataset.dir ?? "0", 10);
         if (dir !== 0) this.cycleWalls(dir);
+        return;
+      }
+      // Advanced wave dialog: numeric stepper for any field.
+      const advBumpBtn = target?.closest('button[data-action="editor-adv-bump"]') as HTMLButtonElement | null;
+      if (advBumpBtn && !advBumpBtn.disabled) {
+        playSfx("click");
+        const field = advBumpBtn.dataset.field ?? "";
+        const delta = parseFloat(advBumpBtn.dataset.delta ?? "0");
+        if (field && Number.isFinite(delta)) this.bumpAdvancedField(field, delta);
+        return;
+      }
+      // Advanced wave dialog: cycler (`‹ ›`) for fields with a fixed
+      // value set — Origin, Safe column.
+      const advCycleBtn = target?.closest('button[data-action="editor-adv-cycle"]') as HTMLButtonElement | null;
+      if (advCycleBtn && !advCycleBtn.disabled) {
+        playSfx("click");
+        const field = advCycleBtn.dataset.field ?? "";
+        const dir = parseInt(advCycleBtn.dataset.dir ?? "0", 10);
+        if (field && dir !== 0) this.cycleAdvancedField(field, dir);
         return;
       }
       // Wave dialog: cluster mix +/- bump.
@@ -1322,6 +1498,7 @@ export class Game {
       if (dialogOk) {
         playSfx("click");
         if (this.editorDialog === "wave") this.applyWaveDialog();
+        else if (this.editorDialog === "customWave") this.applyCustomWaveDialog();
         else if (this.editorDialog === "settings") this.applySettingsDialog();
         return;
       }
@@ -1347,6 +1524,15 @@ export class Game {
           dlg.querySelectorAll<HTMLButtonElement>(".editor-diff-btn").forEach((b) => b.classList.remove("selected"));
           diffPick.classList.add("selected");
         }
+        return;
+      }
+      // Settings dialog: numeric stepper (durations, star thresholds).
+      const settingsBumpBtn = target?.closest('button[data-action="editor-settings-bump"]') as HTMLButtonElement | null;
+      if (settingsBumpBtn && !settingsBumpBtn.disabled) {
+        playSfx("click");
+        const field = settingsBumpBtn.dataset.field ?? "";
+        const delta = parseFloat(settingsBumpBtn.dataset.delta ?? "0");
+        if (field && Number.isFinite(delta)) this.bumpSettingsField(field, delta);
         return;
       }
       // Settings: auto-suggest stars.
@@ -1685,6 +1871,7 @@ export class Game {
     this.setScoreVisible(true);
     this.setPauseButtonVisible(true);
     this.setSliderEnabled(true);
+    this.setInPlay(true);
     setMusicSpeed(1);
     startMusic();
     this.maybeShowControlsHint();
@@ -1725,6 +1912,8 @@ export class Game {
     this.setScoreVisible(false);
     this.setPauseButtonVisible(false);
     this.setHudVisible(true);
+    // Main menu — touchbar serves no purpose, hide it.
+    this.setInPlay(false);
   }
 
   private setScoreVisible(visible: boolean): void {
@@ -1815,7 +2004,7 @@ export class Game {
   private refreshChallengeEditorLock(): void {
     const btn = this.overlay.querySelector<HTMLButtonElement>('button[data-action="challenge-editor"]');
     if (!btn) return;
-    const unlocked = loadChallengeProgress().purchasedUnlock || this.debugEnabled;
+    const unlocked = loadChallengeProgress().purchasedUnlock || this.debugEnabled || this.isEditorTempUnlocked();
     btn.classList.toggle("locked", !unlocked);
     btn.innerHTML = unlocked
       ? "CHALLENGE EDITOR"
@@ -1841,6 +2030,7 @@ export class Game {
     this.setScoreVisible(false);
     this.setPauseButtonVisible(false);
     this.setHudVisible(false);
+    this.setInPlay(false);
     this.renderUnlockShop();
     this.overlay.classList.remove("hidden");
     if (isStoreKitAvailable() && !this.unlockProduct) {
@@ -1866,6 +2056,7 @@ export class Game {
     this.setScoreVisible(false);
     this.setPauseButtonVisible(false);
     this.setHudVisible(false);
+    this.setInPlay(false);
     this.renderBlocksGuide();
     this.overlay.classList.remove("hidden");
   }
@@ -1937,6 +2128,7 @@ export class Game {
     this.setScoreVisible(false);
     this.setPauseButtonVisible(false);
     this.setHudVisible(false);
+    this.setInPlay(false);
     this.setEditorActive(true);
     this.renderEditorHome();
     this.overlay.classList.remove("hidden");
@@ -2048,6 +2240,7 @@ export class Game {
     this.setScoreVisible(false);
     this.setPauseButtonVisible(false);
     this.setHudVisible(false);
+    this.setInPlay(false);
     this.setEditorActive(true);
     this.renderEditorEdit();
     this.overlay.classList.remove("hidden");
@@ -2070,14 +2263,17 @@ export class Game {
 
       let infoHtml: string;
       if (parsed) {
+        const isCustom = this.isCustomShapedWave(line);
         const blocksPer10s = Math.round(10 / parsed.spawnInterval);
-        const countLabel = parsed.countCap !== null
+        const countLabel = parsed.countCap !== null && parsed.countCap > 0
           ? `<span class="editor-wave-info-item"><span class="editor-wave-info-label">×</span>${parsed.countCap}</span>`
-          : parsed.slots.length > 0
-            ? `<span class="editor-wave-info-item"><span class="editor-wave-info-label">slots</span>${parsed.slots.length}</span>`
-            : "";
+          : "";
+        const customBadge = isCustom
+          ? `<span class="editor-wave-info-item editor-wave-info-custom">CUSTOM</span>`
+          : "";
         infoHtml = `
           <div class="editor-wave-info">
+            ${customBadge}
             <span class="editor-wave-info-item"><span class="editor-wave-info-label">Speed</span>${parsed.baseSpeedMul.toFixed(2)}</span>
             <span class="editor-wave-info-item"><span class="editor-wave-info-label">Rate</span>${blocksPer10s}/10s</span>
             ${countLabel}
@@ -2104,9 +2300,17 @@ export class Game {
     const seedHex = `0x${(c.seed >>> 0).toString(16).padStart(8, "0")}`;
     const dialogHtml = this.editorDialog === "wave"
       ? this.renderWaveDialogHtml()
-      : this.editorDialog === "settings"
-        ? this.renderSettingsDialogHtml(c)
-        : "";
+      : this.editorDialog === "customWave"
+        ? this.renderCustomWaveDialogHtml()
+        : this.editorDialog === "settings"
+          ? this.renderSettingsDialogHtml(c)
+          : "";
+
+    // Snapshot scroll positions of in-place re-rendered dialogs so the
+    // user doesn't get yanked back to the top after every tweak.
+    const customDialogScroll = this.overlay.querySelector<HTMLElement>(".editor-dialog-custom-wave")?.scrollTop ?? 0;
+    const waveDialogScroll = this.overlay.querySelector<HTMLElement>(".editor-dialog-wave")?.scrollTop ?? 0;
+    const customPaletteScroll = this.overlay.querySelector<HTMLElement>(".editor-custom-palette-row")?.scrollLeft ?? 0;
 
     this.overlay.innerHTML = `
       <div class="editor-edit">
@@ -2137,7 +2341,10 @@ export class Game {
         </div>
         <div class="editor-wave-list">
           ${rows}
-          <button type="button" class="editor-add-wave" data-action="editor-add-wave" ${wavesAtMax ? "disabled" : ""}>${wavesAtMax ? "Maximum 100 waves" : "+ Add wave"}</button>
+          <div class="editor-add-wave-row">
+            <button type="button" class="editor-add-wave" data-action="editor-add-wave" ${wavesAtMax ? "disabled" : ""}>${wavesAtMax ? "Maximum 100 waves" : "+ Add Regular Wave"}</button>
+            <button type="button" class="editor-add-wave editor-add-wave-custom" data-action="editor-add-custom-wave" ${wavesAtMax ? "disabled" : ""}>${wavesAtMax ? "" : "+ Add Custom Wave"}</button>
+          </div>
         </div>
         ${dialogHtml}
       </div>
@@ -2161,8 +2368,58 @@ export class Game {
       if (!kind) return;
       drawBlockIcon(cv, kind);
     });
+    // Paint custom-wave palette + grid cell icons.
+    this.overlay.querySelectorAll<HTMLCanvasElement>("canvas[data-block-icon]").forEach((cv) => {
+      const kind = cv.dataset.blockIcon as ClusterKind | undefined;
+      if (!kind) return;
+      drawBlockIcon(cv, kind);
+    });
+    // Paint the cell-picker's polyhex previews ("kind:size" attribute).
+    this.overlay.querySelectorAll<HTMLCanvasElement>("canvas[data-shape-icon]").forEach((cv) => {
+      const attr = cv.dataset.shapeIcon ?? "";
+      const [kind, sizeStr] = attr.split(":");
+      const size = parseInt(sizeStr ?? "1", 10);
+      if (!kind || !Number.isFinite(size)) return;
+      drawClusterShapeIcon(cv, kind as ClusterKind, size);
+    });
 
     this.bindEditorDragHandles();
+
+    // Restore preserved scroll positions of in-place dialogs.
+    const customDlg = this.overlay.querySelector<HTMLElement>(".editor-dialog-custom-wave");
+    if (customDlg && customDialogScroll > 0) customDlg.scrollTop = customDialogScroll;
+    const waveDlg = this.overlay.querySelector<HTMLElement>(".editor-dialog-wave");
+    if (waveDlg && waveDialogScroll > 0) waveDlg.scrollTop = waveDialogScroll;
+    const customPalette = this.overlay.querySelector<HTMLElement>(".editor-custom-palette-row");
+    if (customPalette && customPaletteScroll > 0) customPalette.scrollLeft = customPaletteScroll;
+
+    // Position the cell-picker popup beside the clicked cell, clamping
+    // to the viewport. The picker lives outside the transformed dialog
+    // so position: fixed coords are viewport-relative here.
+    if (this.editorCustomCellPicker?.cellRect) {
+      const picker = this.overlay.querySelector<HTMLElement>(".editor-custom-picker");
+      if (picker) this.positionCustomCellPicker(picker, this.editorCustomCellPicker.cellRect);
+    }
+  }
+
+  private positionCustomCellPicker(picker: HTMLElement, cellRect: DOMRect): void {
+    const PAD = 8;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    // Force a layout flush before measuring so width/height reflect CSS.
+    const w = picker.offsetWidth || 360;
+    const h = picker.offsetHeight || 240;
+    let left = cellRect.left + cellRect.width / 2 - w / 2;
+    if (left + w > vw - PAD) left = vw - PAD - w;
+    if (left < PAD) left = PAD;
+    let top = cellRect.bottom + 6;
+    if (top + h > vh - PAD) {
+      // Not enough room below — try above.
+      top = cellRect.top - h - 6;
+    }
+    if (top < PAD) top = PAD;
+    picker.style.left = `${left}px`;
+    picker.style.top = `${top}px`;
   }
 
   // Pointer-event-based drag-reorder. Mirrors the touch/mouse routing
@@ -2302,6 +2559,7 @@ export class Game {
     this.overlay.classList.add("hidden");
     this.setEditorActive(false);
     this.setHudVisible(true);
+    this.setInPlay(true);
     this.setScoreVisible(true);
     this.setPauseButtonVisible(true);
     this.setSliderEnabled(true);
@@ -2480,7 +2738,11 @@ export class Game {
     return `
       <div class="editor-dialog-backdrop" data-action="editor-dialog-cancel"></div>
       <div class="editor-dialog editor-dialog-wave" role="dialog" aria-label="${titleText}">
-        <h2>${escapeHtml(titleText)}</h2>
+        <div class="editor-dialog-top">
+          <button type="button" class="challenge-back" data-action="editor-dialog-ok">← Save</button>
+          <h2>${escapeHtml(titleText)}</h2>
+          <span style="width:60px"></span>
+        </div>
         ${errBanner}
         ${slotsBanner}
         <button type="button" class="editor-section-toggle" data-action="editor-toggle-presets">
@@ -2510,55 +2772,131 @@ export class Game {
   // same row layout as the basic-view quick controls so the two
   // sections feel consistent.
   private renderWaveAdvancedHtml(w: ParsedWave): string {
-    const originRadios = (["top", "topAngled", "side"] as const)
-      .map((o) => `<label class="editor-radio"><input type="radio" name="dialog-origin" data-dialog-field="origin" value="${o}" ${w.origin === o ? "checked" : ""}/>${o}</label>`)
-      .join("");
-    const safeColOptions: string[] = ['<option value="random">random</option>', '<option value="none">none</option>'];
-    for (let i = 0; i <= 8; i++) safeColOptions.push(`<option value="${i}">${i}</option>`);
-    const safeColVal = w.safeCol === null ? "random" : w.safeCol === "none" ? "none" : String(w.safeCol);
-    const safeColSelect = safeColOptions
-      .map((opt) => opt.replace(/value="([^"]*)"/, (_m, v) => `value="${v}"${v === safeColVal ? " selected" : ""}`))
-      .join("");
+    const isZigzag = w.walls === "zigzag";
+    const fmtInt = (v: number) => String(Math.round(v));
+    const fmt2 = (v: number) => v.toFixed(2);
+    const fmt1 = (v: number) => v.toFixed(1);
+    const safeColLabel =
+      w.safeCol === null ? "Random" : w.safeCol === "none" ? "None" : String(w.safeCol);
+    const originLabel =
+      w.origin === "top" ? "Top" : w.origin === "topAngled" ? "Top angled" : "Side";
     return `
       <div class="editor-dialog-body">
-        <label class="editor-field">
-          <span class="editor-field-label">Size min${helpTipHtml("sizeMin")}</span>
-          <input type="number" min="1" max="5" step="1" data-dialog-field="sizeMin" value="${w.sizeMin}"/>
-        </label>
-        <label class="editor-field">
-          <span class="editor-field-label">Size max${helpTipHtml("sizeMax")}</span>
-          <input type="number" min="1" max="5" step="1" data-dialog-field="sizeMax" value="${w.sizeMax}"/>
-        </label>
-        <label class="editor-field">
-          <span class="editor-field-label">Speed${helpTipHtml("speed")}</span>
-          <input type="number" min="0.5" max="3" step="0.05" data-dialog-field="speed" value="${w.baseSpeedMul}"/>
-        </label>
-        <label class="editor-field">
-          <span class="editor-field-label">Slot rate${helpTipHtml("slotRate")}</span>
-          <input type="number" min="0.05" max="2" step="0.05" data-dialog-field="slotRate" value="${w.slotInterval}"/>
-        </label>
-        <label class="editor-field">
-          <span class="editor-field-label">Wall amp${helpTipHtml("wallAmp")}</span>
-          <input type="number" min="0" max="0.5" step="0.02" data-dialog-field="wallAmp" value="${w.wallAmp}"/>
-        </label>
-        <label class="editor-field">
-          <span class="editor-field-label">Wall period${helpTipHtml("wallPeriod")}</span>
-          <input type="number" min="0.05" max="5" step="0.1" data-dialog-field="wallPeriod" value="${w.wallPeriod}"/>
-        </label>
-        <label class="editor-field">
-          <span class="editor-field-label">Safe column${helpTipHtml("safeCol")}</span>
-          <select data-dialog-field="safeCol">${safeColSelect}</select>
-        </label>
-        <fieldset class="editor-radio-group">
-          <legend>Origin${helpTipHtml("origin")}</legend>
-          ${originRadios}
-        </fieldset>
-        <label class="editor-field">
-          <span class="editor-field-label">Tilt (rad)${helpTipHtml("dir")}</span>
-          <input type="number" min="-1" max="1" step="0.05" data-dialog-field="dir" value="${w.defaultDir}"/>
-        </label>
+        ${this.renderAdvStepper("sizeMin", "Size min", w.sizeMin, { min: 1, max: 5, step: 1, format: fmtInt })}
+        ${this.renderAdvStepper("sizeMax", "Size max", w.sizeMax, { min: 1, max: 5, step: 1, format: fmtInt })}
+        ${this.renderAdvStepper("speed", "Speed", w.baseSpeedMul, { min: 0.5, max: 3.0, step: 0.05, format: fmt2 })}
+        ${this.renderAdvStepper("wallAmp", "Wall amp", w.wallAmp, { min: 0, max: 0.5, step: 0.02, format: fmt2, disabled: !isZigzag })}
+        ${this.renderAdvStepper("wallPeriod", "Wall period", w.wallPeriod, { min: 0.05, max: 5, step: 0.1, format: fmt1, disabled: !isZigzag })}
+        ${this.renderAdvCycler("safeCol", "Safe column", safeColLabel)}
+        ${this.renderAdvCycler("origin", "Origin", originLabel)}
+        ${this.renderAdvStepper("dir", "Tilt (rad)", w.defaultDir, { min: -1, max: 1, step: 0.05, format: fmt2 })}
       </div>
     `;
+  }
+
+  // Themed `‹ LABEL ›` cycler matching the basic Walls control. Used
+  // for Advanced fields whose values are a small fixed list (Origin,
+  // Safe column).
+  private renderAdvCycler(field: string, label: string, displayValue: string): string {
+    return `
+      <div class="editor-quick-row">
+        <span class="editor-quick-label">${escapeHtml(label)}${helpTipHtml(field)}</span>
+        <div class="editor-quick-walls-controls">
+          <button type="button" class="editor-walls-arrow"
+            data-action="editor-adv-cycle" data-field="${field}" data-dir="-1" aria-label="Previous">‹</button>
+          <span class="editor-walls-name">${escapeHtml(displayValue)}</span>
+          <button type="button" class="editor-walls-arrow"
+            data-action="editor-adv-cycle" data-field="${field}" data-dir="1" aria-label="Next">›</button>
+        </div>
+      </div>
+    `;
+  }
+
+  private cycleAdvancedField(field: string, dir: number): void {
+    this.mutateDialogWave((w) => {
+      if (field === "origin") {
+        const opts: Array<"top" | "topAngled" | "side"> = ["top", "topAngled", "side"];
+        const idx = Math.max(0, opts.indexOf(w.origin));
+        w.origin = opts[(idx + dir + opts.length) % opts.length]!;
+      } else if (field === "safeCol") {
+        // null = random, "none" = no enforcement, 0..8 explicit columns.
+        const opts: Array<number | "none" | null> = [null, "none", 0, 1, 2, 3, 4, 5, 6, 7, 8];
+        const cur = w.safeCol;
+        let curIdx = opts.findIndex((o) => o === cur);
+        if (curIdx < 0) curIdx = 0;
+        w.safeCol = opts[(curIdx + dir + opts.length) % opts.length]!;
+      }
+    });
+  }
+
+  // Themed stepper row matching the basic-view +/- controls. Used by
+  // every numeric field in Advanced so it visually matches Count /
+  // Duration / Rate / mix on the basic bar.
+  private renderAdvStepper(
+    field: string,
+    label: string,
+    value: number,
+    opts: {
+      min: number;
+      max: number;
+      step: number;
+      format: (v: number) => string;
+      disabled?: boolean;
+      helpKey?: string;
+    },
+  ): string {
+    const disabled = !!opts.disabled;
+    const eps = opts.step * 0.001;
+    const atMin = value <= opts.min + eps;
+    const atMax = value >= opts.max - eps;
+    const helpKey = opts.helpKey ?? field;
+    return `
+      <div class="editor-quick-row${disabled ? " editor-quick-row-disabled" : ""}">
+        <span class="editor-quick-label">${escapeHtml(label)}${helpTipHtml(helpKey)}</span>
+        <div class="editor-quick-controls">
+          <button type="button" class="editor-mix-step editor-mix-minus"
+            data-action="editor-adv-bump" data-field="${field}" data-delta="${-opts.step}"
+            ${disabled || atMin ? "disabled" : ""}>−</button>
+          <span class="editor-mix-value">${opts.format(value)}</span>
+          <button type="button" class="editor-mix-step editor-mix-plus"
+            data-action="editor-adv-bump" data-field="${field}" data-delta="${opts.step}"
+            ${disabled || atMax ? "disabled" : ""}>+</button>
+        </div>
+      </div>
+    `;
+  }
+
+  private bumpAdvancedField(field: string, delta: number): void {
+    this.mutateDialogWave((w) => {
+      switch (field) {
+        case "sizeMin": {
+          w.sizeMin = Math.max(1, Math.min(5, Math.round(w.sizeMin + delta)));
+          if (w.sizeMin > w.sizeMax) w.sizeMax = w.sizeMin;
+          break;
+        }
+        case "sizeMax": {
+          w.sizeMax = Math.max(1, Math.min(5, Math.round(w.sizeMax + delta)));
+          if (w.sizeMax < w.sizeMin) w.sizeMin = w.sizeMax;
+          break;
+        }
+        case "speed": {
+          w.baseSpeedMul = clampRound(w.baseSpeedMul + delta, 0.5, 3.0, 0.05);
+          break;
+        }
+        case "wallAmp": {
+          w.wallAmp = clampRound(w.wallAmp + delta, 0, 0.5, 0.02);
+          break;
+        }
+        case "wallPeriod": {
+          w.wallPeriod = clampRound(w.wallPeriod + delta, 0.05, 5, 0.1);
+          break;
+        }
+        case "dir": {
+          w.defaultDir = clampRound(w.defaultDir + delta, -1, 1, 0.05);
+          break;
+        }
+      }
+    });
   }
 
   // Re-build the line from the active preset and re-render. Used when
@@ -2705,6 +3043,470 @@ export class Game {
     });
   }
 
+  // ----- Custom Wave dialog --------------------------------------------
+
+  private renderCustomWaveDialogHtml(): string {
+    const titleText = this.editorDialogIsNewWave
+      ? "New custom wave"
+      : `Custom wave ${(this.editorDialogWaveIdx ?? 0) + 1}`;
+
+    // Palette: one row of kind buttons. Currently scrolls horizontally
+    // when the dialog is too narrow to fit all 9 kinds inline.
+    const paletteHtml = CUSTOM_WAVE_KINDS.map((k) => {
+      const sel = k === this.editorCustomWaveKind ? " selected" : "";
+      return `
+        <button type="button" class="editor-custom-kind${sel}"
+          data-action="editor-custom-kind" data-kind="${k}"
+          aria-label="${escapeHtml(k)}">
+          <canvas class="editor-custom-kind-icon" data-block-icon="${k}" width="36" height="36"></canvas>
+          <span class="editor-custom-kind-label">${escapeHtml(k.toUpperCase())}</span>
+        </button>
+      `;
+    }).join("");
+
+    // OPTIONS section (collapsible): Rate, Speed, Walls.
+    const rateBlocks = Math.round(10 / this.editorCustomWaveRate);
+    const wallsName = WALL_LABEL[this.editorCustomWaveWalls] ?? "No walls";
+    const optionsOpen = this.editorCustomWaveOptionsOpen;
+    const optionsChevron = optionsOpen ? "−" : "+";
+    const optionsHtml = `
+      <button type="button" class="editor-section-toggle" data-action="editor-custom-options-toggle">
+        <span class="editor-advanced-chevron">${optionsChevron}</span> Options
+      </button>
+      <section class="editor-quick editor-custom-options${optionsOpen ? " open" : ""}">
+        <div class="editor-quick-row">
+          <span class="editor-quick-label">Rate${helpTipHtml("rate")}</span>
+          <div class="editor-quick-controls">
+            <button type="button" class="editor-mix-step editor-mix-minus"
+              data-action="editor-custom-rate" data-delta="-5"
+              ${this.editorCustomWaveRate >= 1.95 ? "disabled" : ""}>−</button>
+            <span class="editor-mix-value">${rateBlocks}/10s</span>
+            <button type="button" class="editor-mix-step editor-mix-plus"
+              data-action="editor-custom-rate" data-delta="5"
+              ${this.editorCustomWaveRate <= 0.0501 ? "disabled" : ""}>+</button>
+          </div>
+        </div>
+        <div class="editor-quick-row">
+          <span class="editor-quick-label">Speed${helpTipHtml("speed")}</span>
+          <div class="editor-quick-controls">
+            <button type="button" class="editor-mix-step editor-mix-minus"
+              data-action="editor-custom-speed" data-delta="-0.05"
+              ${this.editorCustomWaveSpeed <= 0.55 ? "disabled" : ""}>−</button>
+            <span class="editor-mix-value">${this.editorCustomWaveSpeed.toFixed(2)}</span>
+            <button type="button" class="editor-mix-step editor-mix-plus"
+              data-action="editor-custom-speed" data-delta="0.05"
+              ${this.editorCustomWaveSpeed >= 2.95 ? "disabled" : ""}>+</button>
+          </div>
+        </div>
+        <div class="editor-quick-row">
+          <span class="editor-quick-label">Walls${helpTipHtml("walls")}</span>
+          <div class="editor-quick-walls-controls">
+            <button type="button" class="editor-walls-arrow" data-action="editor-custom-walls" data-dir="-1" aria-label="Previous wall">‹</button>
+            <span class="editor-walls-name">${escapeHtml(wallsName)}</span>
+            <button type="button" class="editor-walls-arrow" data-action="editor-custom-walls" data-dir="1" aria-label="Next wall">›</button>
+          </div>
+        </div>
+      </section>
+    `;
+
+    // Dynamic-length grid. Show only `visibleRows` rows top-down (highest
+    // index first) so the bottom row is the start of the wave (slot 0).
+    // The "Add row" button at the top inserts another empty row up to the
+    // CUSTOM_WAVE_LEN cap.
+    const visible = Math.min(this.editorCustomWaveVisibleRows, CUSTOM_WAVE_LEN);
+    const rowsHtml: string[] = [];
+    const atCap = visible >= CUSTOM_WAVE_LEN;
+    rowsHtml.push(`
+      <button type="button" class="editor-custom-addrow" data-action="editor-custom-addrow" ${atCap ? "disabled" : ""}>
+        ${atCap ? "Maximum 30 rows" : "+ Add row"}
+      </button>
+    `);
+    for (let i = visible - 1; i >= 0; i--) {
+      rowsHtml.push(this.renderCustomWaveRowHtml(i));
+    }
+    const gridHtml = `
+      <section class="editor-custom-grid" aria-label="Wave timeline">
+        ${rowsHtml.join("")}
+      </section>
+    `;
+
+    return `
+      <div class="editor-dialog-backdrop" data-action="editor-dialog-cancel"></div>
+      <div class="editor-dialog editor-dialog-custom-wave" role="dialog" aria-label="${titleText}">
+        <div class="editor-dialog-top">
+          <button type="button" class="challenge-back" data-action="editor-dialog-ok">← Save</button>
+          <h2>${escapeHtml(titleText)}</h2>
+          <span style="width:60px"></span>
+        </div>
+        ${optionsHtml}
+        <section class="editor-custom-palette">
+          <div class="editor-custom-palette-row">${paletteHtml}</div>
+        </section>
+        ${gridHtml}
+        <div class="editor-dialog-actions">
+          <button type="button" class="challenge-back" data-action="editor-dialog-cancel">Cancel</button>
+          <button type="button" class="play-btn" data-action="editor-dialog-ok">${this.editorDialogIsNewWave ? "ADD" : "OK"}</button>
+        </div>
+      </div>
+      ${this.renderCustomCellPickerHtml()}
+    `;
+  }
+
+  // Picker popup shown when the user taps a placed cell. Lets them
+  // pick a size (1-5) with a real polyhex preview and an angle (0..6
+  // for main cells; sides are fixed at 7/8). Tapping outside closes.
+  private renderCustomCellPickerHtml(): string {
+    const picker = this.editorCustomCellPicker;
+    if (!picker) return "";
+    const slot = this.editorCustomWaveSlots[picker.rowIdx];
+    if (!slot) return "";
+    const isSide = slot.side !== "main";
+    // Pickup kinds (coin / shield / drone) are always single-hex
+    // in-game — the picker greys out sizes 2-5 so the user can't author
+    // a multi-cell pickup.
+    const isPickup = slot.kind === "coin" || slot.kind === "shield" || slot.kind === "drone";
+    const sizeButtons = [1, 2, 3, 4, 5].map((s) => {
+      const disabled = isPickup && s > 1;
+      return `
+        <button type="button" class="editor-custom-pick-size${slot.size === s ? " selected" : ""}"
+          data-action="editor-custom-pick-size" data-size="${s}"
+          ${disabled ? "disabled" : ""}>
+          <canvas class="editor-custom-pick-canvas" data-shape-icon="${slot.kind}:${s}" width="44" height="44"></canvas>
+          <span class="editor-custom-pick-label">${s}</span>
+        </button>
+      `;
+    }).join("");
+    // Order angles left → straight → right for an intuitive layout.
+    const angleOrder = [5, 3, 1, 0, 2, 4, 6];
+    const angleButtons = angleOrder.map((a) => `
+      <button type="button" class="editor-custom-pick-angle${slot.angleIdx === a ? " selected" : ""}"
+        data-action="editor-custom-pick-angle" data-angle="${a}"
+        aria-label="Angle ${a}">
+        <span class="editor-custom-pick-arrow" style="transform: rotate(${angleToCssRotation(a)}deg)">↓</span>
+      </button>
+    `).join("");
+    return `
+      <div class="editor-custom-picker-backdrop" data-action="editor-custom-picker-close"></div>
+      <div class="editor-custom-picker" role="dialog" aria-label="Edit block">
+        <div class="editor-custom-picker-section">
+          <span class="editor-custom-picker-label">Size</span>
+          <div class="editor-custom-picker-sizes">${sizeButtons}</div>
+        </div>
+        ${isSide ? "" : `
+          <div class="editor-custom-picker-section">
+            <span class="editor-custom-picker-label">Direction</span>
+            <div class="editor-custom-picker-angles">${angleButtons}</div>
+          </div>
+        `}
+      </div>
+    `;
+  }
+
+  private renderCustomWaveRowHtml(rowIdx: number): string {
+    const slot = this.editorCustomWaveSlots[rowIdx];
+    const cellHtml = (
+      side: "main" | "left" | "right",
+      col: number,
+    ): string => {
+      const filled =
+        !!slot &&
+        slot.side === side &&
+        (side !== "main" || slot.col === col);
+      const sideAttr = side === "main" ? "" : ` data-side="${side}"`;
+      const colAttr = side === "main" ? ` data-col="${col}"` : "";
+      const sideCls = side === "main" ? "" : ` editor-custom-cell-side editor-custom-cell-${side}`;
+      const filledCls = filled ? " has-hex" : "";
+      const angle = filled && slot ? slot.angleIdx : 0;
+      const rot = filled ? angleToCssRotation(angle) : 0;
+      const kindAttr = filled && slot ? ` data-kind="${slot.kind}"` : "";
+      const sizeText = filled && slot ? `<span class="editor-custom-size">${slot.size}</span>` : "";
+      const arrow = filled && slot && slot.side === "main" && slot.angleIdx !== 0
+        ? `<span class="editor-custom-arrow" style="transform: rotate(${rot}deg)">↓</span>`
+        : "";
+      const iconCanvas = filled
+        ? `<canvas class="editor-custom-cell-icon" data-cell-icon="${rowIdx}-${side}-${col}" data-block-icon="${slot!.kind}" width="22" height="22"></canvas>`
+        : "";
+      return `
+        <button type="button" class="editor-custom-cell${sideCls}${filledCls}"
+          data-action="editor-custom-cell" data-row="${rowIdx}"${sideAttr}${colAttr}
+          data-has-hex="${filled ? 1 : 0}"${kindAttr}>
+          ${iconCanvas}${sizeText}${arrow}
+        </button>
+      `;
+    };
+
+    const mainCells: string[] = [];
+    for (let col = 0; col < 10; col++) mainCells.push(cellHtml("main", col));
+
+    return `
+      <div class="editor-custom-row" data-row="${rowIdx}">
+        ${cellHtml("left", 0)}
+        <div class="editor-custom-row-main">${mainCells.join("")}</div>
+        ${cellHtml("right", 0)}
+        <button type="button" class="editor-custom-clear"
+          data-action="editor-custom-clear" data-row="${rowIdx}"
+          aria-label="Clear row">×</button>
+      </div>
+    `;
+  }
+
+
+
+  // True for slot-only waves (count=0 + slots) — those open in the
+  // tile-grid editor; everything else opens in the regular preset
+  // dialog so the existing cluster mix / preset machinery handles it.
+  private isCustomShapedWave(line: string): boolean {
+    try {
+      const w = parseWaveLine(line);
+      return (w.countCap === 0 || w.countCap === null) && w.slots.length > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  private openNewCustomWaveDialog(): void {
+    if (!this.editingCustom) return;
+    if (this.editingCustom.waves.length >= MAX_WAVES_PER_CUSTOM) return;
+    this.editorDialog = "customWave";
+    this.editorDialogIsNewWave = true;
+    this.editorDialogWaveIdx = null;
+    this.editorCustomWaveSlots = new Array(CUSTOM_WAVE_LEN).fill(null);
+    this.editorCustomWaveKind = "normal";
+    this.editorCustomWaveRate = 0.5;
+    this.editorCustomWaveSpeed = 1.2;
+    this.editorCustomWaveWalls = "none";
+    this.editorCustomWaveOptionsOpen = false;
+    this.editorCustomWaveVisibleRows = 1;
+    this.editorDialogWaveLine = this.composeCustomWaveLine();
+    this.renderEditorEdit();
+    this.startWavePreview();
+  }
+
+  private openExistingCustomWaveDialog(idx: number): void {
+    if (!this.editingCustom) return;
+    const line = this.editingCustom.waves[idx] ?? "";
+    let parsed: ParsedWave | null = null;
+    try { parsed = parseWaveLine(line); } catch { parsed = null; }
+    this.editorDialog = "customWave";
+    this.editorDialogIsNewWave = false;
+    this.editorDialogWaveIdx = idx;
+    // Inflate slots into the editor's 30-row buffer (truncate / pad as
+    // needed). Map back from angleIdx 7/8 to side cells.
+    const slots: typeof this.editorCustomWaveSlots = new Array(CUSTOM_WAVE_LEN).fill(null);
+    if (parsed) {
+      const len = Math.min(CUSTOM_WAVE_LEN, parsed.slots.length);
+      for (let i = 0; i < len; i++) {
+        const s = parsed.slots[i];
+        if (!s) continue;
+        const side: "main" | "left" | "right" =
+          s.angleIdx === 7 ? "left" : s.angleIdx === 8 ? "right" : "main";
+        slots[i] = {
+          kind: s.kind,
+          size: s.size,
+          side,
+          col: side === "main" ? Math.max(0, Math.min(9, s.col)) : 0,
+          angleIdx: s.angleIdx,
+        };
+      }
+    }
+    this.editorCustomWaveSlots = slots;
+    this.editorCustomWaveKind = "normal";
+    this.editorCustomWaveRate = parsed?.slotInterval ?? 0.5;
+    this.editorCustomWaveSpeed = parsed?.baseSpeedMul ?? 1.2;
+    this.editorCustomWaveWalls = parsed?.walls ?? "none";
+    this.editorCustomWaveOptionsOpen = false;
+    // Show as many rows as the original wave defined; ensure the
+    // topmost row is empty so the user has somewhere to keep adding.
+    const filledLen = parsed?.slots.length ?? 0;
+    let rows = Math.max(1, Math.min(CUSTOM_WAVE_LEN, filledLen));
+    if (filledLen > 0 && slots[filledLen - 1] !== null && rows < CUSTOM_WAVE_LEN) rows += 1;
+    this.editorCustomWaveVisibleRows = rows;
+    this.editorDialogWaveLine = this.composeCustomWaveLine();
+    this.renderEditorEdit();
+    this.startWavePreview();
+  }
+
+  // Place a hex at (row, side/col) using the currently-selected kind.
+  // Tapping the same position cycles size; tapping a different position
+  // in the same row moves the row's hex.
+  private placeCustomWaveCell(
+    row: number,
+    side: "main" | "left" | "right",
+    col: number,
+  ): void {
+    const slot = this.editorCustomWaveSlots[row];
+    const sameCell =
+      !!slot && slot.side === side && (side !== "main" || slot.col === col);
+    const sameKind = !!slot && slot.kind === this.editorCustomWaveKind;
+    if (sameCell && sameKind) {
+      // Same position AND same kind selected → open the size / angle
+      // picker so the user can fine-tune the existing block.
+      this.openCustomCellPicker(row);
+      return;
+    }
+    // Different kind selected, or different cell in the same row: place
+    // a fresh block (swapping out whatever was there).
+    this.editorCustomWaveSlots[row] = {
+      kind: this.editorCustomWaveKind,
+      size: 1,
+      side,
+      col: side === "main" ? col : 0,
+      angleIdx: side === "left" ? 7 : side === "right" ? 8 : 0,
+    };
+    // Auto-grow: keep the topmost visible row empty so the user has
+    // somewhere to land the next placement. Cap at CUSTOM_WAVE_LEN.
+    const topIdx = this.editorCustomWaveVisibleRows - 1;
+    if (
+      this.editorCustomWaveSlots[topIdx] !== null &&
+      this.editorCustomWaveVisibleRows < CUSTOM_WAVE_LEN
+    ) {
+      this.editorCustomWaveVisibleRows += 1;
+    }
+    this.editorDialogWaveLine = this.composeCustomWaveLine();
+    this.renderEditorEdit();
+  }
+
+  // "Add row" button at the top of the grid — inserts another empty
+  // row above the current topmost. Capped at CUSTOM_WAVE_LEN.
+  private addCustomWaveRow(): void {
+    if (this.editorCustomWaveVisibleRows >= CUSTOM_WAVE_LEN) return;
+    this.editorCustomWaveVisibleRows += 1;
+    this.editorDialogWaveLine = this.composeCustomWaveLine();
+    this.renderEditorEdit();
+  }
+
+  // Rate is shown as blocks-per-10s (higher = denser) but stored as
+  // slotInterval seconds. Treat `delta` as blocks-per-10s so + lifts
+  // the displayed value and − drops it; convert back to seconds via
+  // 10 / blocks. Snaps to multiples of 5 between 5..200 blocks/10s
+  // (= 2.0..0.05s), matching the regular wave editor's stepper.
+  private bumpCustomWaveRate(deltaBlocks: number): void {
+    const curBlocks = 10 / this.editorCustomWaveRate;
+    const snapped = Math.round(curBlocks / 5) * 5;
+    const nextBlocks = Math.max(5, Math.min(200, snapped + deltaBlocks));
+    this.editorCustomWaveRate = 10 / nextBlocks;
+    this.editorDialogWaveLine = this.composeCustomWaveLine();
+    this.renderEditorEdit();
+  }
+
+  private bumpCustomWaveSpeed(delta: number): void {
+    const cur = this.editorCustomWaveSpeed;
+    const next = Math.round((cur + delta) * 100) / 100;
+    this.editorCustomWaveSpeed = Math.max(0.5, Math.min(3.0, next));
+    this.editorDialogWaveLine = this.composeCustomWaveLine();
+    this.renderEditorEdit();
+  }
+
+  private cycleCustomWaveWalls(dir: number): void {
+    const idx = WALL_CYCLE.indexOf(this.editorCustomWaveWalls);
+    const len = WALL_CYCLE.length;
+    const nextIdx = ((idx < 0 ? 0 : idx) + dir + len) % len;
+    this.editorCustomWaveWalls = WALL_CYCLE[nextIdx]!;
+    this.editorDialogWaveLine = this.composeCustomWaveLine();
+    this.renderEditorEdit();
+  }
+
+  // Compose the slot-only wave line. count=0 disables the prob stream
+  // entirely; the slot tokens drive the wave's contents. Slot order is
+  // bottom-row-first (index 0 = first to spawn).
+  private composeCustomWaveLine(): string {
+    const tokens: string[] = [];
+    tokens.push("count=0");
+    tokens.push(`slotRate=${this.editorCustomWaveRate.toFixed(2)}`);
+    tokens.push(`speed=${this.editorCustomWaveSpeed.toFixed(2)}`);
+    if (this.editorCustomWaveWalls !== "none") {
+      tokens.push(`walls=${this.editorCustomWaveWalls}`);
+    }
+    // Emit only the visible rows. Hidden trailing slots are excluded
+    // so a 5-row wave is exactly 5 slot tokens long.
+    const len = Math.min(this.editorCustomWaveVisibleRows, CUSTOM_WAVE_LEN);
+    for (let i = 0; i < len; i++) {
+      const slot = this.editorCustomWaveSlots[i];
+      if (!slot) {
+        tokens.push("000");
+        continue;
+      }
+      const prefix = slotKindToPrefix(slot.kind);
+      const colDigit = slot.side === "main" ? slot.col : 0;
+      tokens.push(`${prefix}${slot.size}${colDigit}${slot.angleIdx}`);
+    }
+    return tokens.join(", ");
+  }
+
+  // Tap on an already-placed cell opens a small picker (size + angle)
+  // rather than cycling. Captures the clicked cell's viewport rect so
+  // the picker can anchor near it (instead of floating viewport-center).
+  private openCustomCellPicker(rowIdx: number): void {
+    const slot = this.editorCustomWaveSlots[rowIdx];
+    if (!slot) return;
+    let sel: string;
+    if (slot.side === "main") {
+      sel = `button[data-action="editor-custom-cell"][data-row="${rowIdx}"][data-col="${slot.col}"]`;
+    } else {
+      sel = `button[data-action="editor-custom-cell"][data-row="${rowIdx}"][data-side="${slot.side}"]`;
+    }
+    const cell = this.overlay.querySelector<HTMLElement>(sel);
+    const cellRect = cell?.getBoundingClientRect() ?? null;
+    this.editorCustomCellPicker = { rowIdx, cellRect };
+    this.renderEditorEdit();
+  }
+
+  private closeCustomCellPicker(): void {
+    if (!this.editorCustomCellPicker) return;
+    this.editorCustomCellPicker = null;
+    this.renderEditorEdit();
+  }
+
+  private setCustomCellSize(rowIdx: number, size: number): void {
+    const slot = this.editorCustomWaveSlots[rowIdx];
+    if (!slot) return;
+    const isPickup = slot.kind === "coin" || slot.kind === "shield" || slot.kind === "drone";
+    slot.size = isPickup ? 1 : Math.max(1, Math.min(5, size));
+    this.editorDialogWaveLine = this.composeCustomWaveLine();
+    // Selection commits — close the picker. Re-tap the cell to set the
+    // other field if needed.
+    this.editorCustomCellPicker = null;
+    this.renderEditorEdit();
+  }
+
+  private setCustomCellAngle(rowIdx: number, angleIdx: number): void {
+    const slot = this.editorCustomWaveSlots[rowIdx];
+    if (!slot || slot.side !== "main") return;
+    slot.angleIdx = Math.max(0, Math.min(6, angleIdx));
+    this.editorDialogWaveLine = this.composeCustomWaveLine();
+    this.editorCustomCellPicker = null;
+    this.renderEditorEdit();
+  }
+
+  private applyCustomWaveDialog(): void {
+    const c = this.editingCustom;
+    if (!c) return;
+    const isNew = this.editorDialogIsNewWave;
+    const idx = this.editorDialogWaveIdx;
+    if (!isNew && idx === null) return;
+    // Sanity: at least one slot must have content.
+    const hasContent = this.editorCustomWaveSlots.some((s) => s !== null);
+    if (!hasContent) {
+      window.alert("Place at least one block before saving.");
+      return;
+    }
+    const newLine = this.composeCustomWaveLine();
+    this.stopWavePreview();
+    if (isNew) {
+      c.waves = [...c.waves, newLine];
+      this.editorSelectedWaveIdx = c.waves.length - 1;
+    } else if (idx !== null) {
+      c.waves[idx] = newLine;
+    }
+    this.editingCustom = upsertCustomChallenge(c);
+    this.editorDialog = null;
+    this.editorDialogWaveIdx = null;
+    this.editorDialogIsNewWave = false;
+    this.editorDialogWaveLine = "";
+    this.editorCustomWaveSlots = new Array(CUSTOM_WAVE_LEN).fill(null);
+    this.renderEditorEdit();
+  }
+
   // ----- Wave preview loop ---------------------------------------------
 
   // Start a fresh preview run. Clears any in-flight clusters, applies
@@ -2742,6 +3544,7 @@ export class Game {
       spawnTimer: parsed.spawnInterval,
       waveTimer: parsed.durOverride ?? 0,
       restartDelay: 0,
+      lastSpeedMul: parsed.baseSpeedMul,
     };
     document.body.classList.add("editor-previewing");
   }
@@ -2776,13 +3579,33 @@ export class Game {
     const mixSum = Object.values(mix).reduce((a, b) => a + (b ?? 0), 0);
     if (mixSum > 0) parsed.weights = { ...mix };
 
-    // Live walls: setWall lerps, so flipping to a different wall mid-loop
-    // looks intentional rather than jarring.
-    if (this.wall.kind !== parsed.walls && this.wall.pendingKind !== parsed.walls) {
+    // Live walls: setWall lerps, so flipping kind looks intentional.
+    // Also re-apply when wallAmp/wallPeriod change so editing those in
+    // Advanced shows up immediately (setWall short-circuits the
+    // same-kind path and just updates amp/period instantly).
+    const wallKindChanged =
+      this.wall.kind !== parsed.walls && this.wall.pendingKind !== parsed.walls;
+    const wallShapeChanged =
+      parsed.walls === "zigzag" &&
+      (Math.abs(this.wall.amp - parsed.wallAmp) > 0.001 ||
+       Math.abs(this.wall.period - parsed.wallPeriod) > 0.001);
+    if (wallKindChanged || wallShapeChanged) {
       if (parsed.walls === "none") this.setWall("none", 0);
       else if (parsed.walls === "zigzag") this.setWall("zigzag", 1.0, { amp: parsed.wallAmp, period: parsed.wallPeriod });
       else if (parsed.walls === "narrow") this.setWall("narrow", 1.0);
       else this.setWall("pinch", 1.0);
+    }
+
+    // Live speed: rescale in-flight cluster velocities so existing
+    // spawns also reflect a Speed tweak — without this, the change
+    // only kicks in for the next slot/prob spawn, which feels broken.
+    if (Math.abs(p.lastSpeedMul - parsed.baseSpeedMul) > 0.001) {
+      const ratio = parsed.baseSpeedMul / Math.max(0.0001, p.lastSpeedMul);
+      for (const c of this.clusters) {
+        const v = c.body.velocity;
+        Body.setVelocity(c.body, { x: v.x * ratio, y: v.y * ratio });
+      }
+      p.lastSpeedMul = parsed.baseSpeedMul;
     }
 
     if (p.restartDelay > 0) {
@@ -2891,7 +3714,7 @@ export class Game {
   // is the auto-balancer — it has no buttons, just shows the residual
   // so the total always equals 100%.
   private renderClusterMixHtml(): string {
-    const order: ClusterKind[] = ["normal", "sticky", "slow", "fast", "coin", "shield", "drone"];
+    const order: ClusterKind[] = ["normal", "sticky", "slow", "fast", "coin", "shield", "drone", "tiny", "big"];
     const rows = order.map((kind) => {
       const isNormal = kind === "normal";
       const value = this.editorDialogPctValues[kind] ?? 0;
@@ -2963,88 +3786,41 @@ export class Game {
     const isNew = this.editorDialogIsNewWave;
     const idx = this.editorDialogWaveIdx;
     if (!isNew && idx === null) return;
-    const dlg = this.overlay.querySelector<HTMLElement>(".editor-dialog");
-    if (!dlg) return;
 
-    const getField = (name: string): string => {
-      const el = dlg.querySelector<HTMLInputElement | HTMLSelectElement>(`[data-dialog-field="${name}"]`);
-      if (el && "value" in el) return el.value;
-      return "";
-    };
-    const getRadio = (name: string): string => {
-      const el = dlg.querySelector<HTMLInputElement>(`input[name="dialog-${name}"]:checked`);
-      return el?.value ?? "";
-    };
+    // The whole working state lives on `editorDialogWaveLine` — every
+    // basic stepper, every advanced cycler / stepper, and the walls
+    // cycler call mutateDialogWave which keeps the line current. So
+    // OK just parses that line, overlays the cluster mix from the
+    // basic view, and carries forward any pre-existing slot tokens.
+    let parsedWorking: ParsedWave;
+    try { parsedWorking = parseWaveLine(this.editorDialogWaveLine); }
+    catch (e) {
+      const dlg = this.overlay.querySelector<HTMLElement>(".editor-dialog");
+      const msg = `Invalid: ${(e as Error).message}`;
+      const errEl = dlg?.querySelector<HTMLElement>(".editor-dialog-err");
+      if (errEl) errEl.textContent = msg;
+      else dlg?.insertAdjacentHTML("afterbegin", `<div class="editor-dialog-err">${escapeHtml(msg)}</div>`);
+      return;
+    }
 
-    const tokens: string[] = [];
-    // Carry forward slot tokens read-only — phase 1 doesn't edit them.
-    // For a brand-new wave there's no source line, so slots stay empty.
-    let parsedExisting: ParsedWave | null = null;
+    // Carry forward the existing slot tokens (phase 1 doesn't edit slot
+    // patterns through the regular dialog). composeWaveLine drops them
+    // because the working line was a fresh recompose, so re-add.
     if (!isNew && idx !== null) {
       const existingLine = c.waves[idx] ?? "";
-      try { parsedExisting = parseWaveLine(existingLine); } catch { /* ignore */ }
+      try {
+        const existing = parseWaveLine(existingLine);
+        parsedWorking.slots = existing.slots;
+      } catch { /* ignore */ }
     }
 
-    const sizeMin = parseInt(getField("sizeMin"), 10);
-    const sizeMax = parseInt(getField("sizeMax"), 10);
-    if (Number.isFinite(sizeMin) && Number.isFinite(sizeMax)) {
-      const lo = Math.max(1, Math.min(5, sizeMin));
-      const hi = Math.max(lo, Math.min(5, sizeMax));
-      tokens.push(lo === hi ? `size=${lo}` : `size=${lo}-${hi}`);
-    }
-
-    const speed = parseFloat(getField("speed"));
-    if (Number.isFinite(speed) && speed > 0) tokens.push(`speed=${speed}`);
-    const slotRate = parseFloat(getField("slotRate"));
-    if (Number.isFinite(slotRate) && slotRate >= 0.05) tokens.push(`slotRate=${slotRate}`);
-
-    // Count / Duration / Rate / Walls live on the always-visible bar
-    // and have been keeping editorDialogWaveLine up to date as the user
-    // tweaks them — read them straight off the parsed working line so
-    // the OK output reflects the live preview. wallAmp / wallPeriod are
-    // still in Advanced; pull them from the form.
-    let parsedWorking: ParsedWave | null = null;
-    try { parsedWorking = parseWaveLine(this.editorDialogWaveLine); } catch { /* fall through */ }
-
-    const rateVal = parsedWorking?.spawnInterval ?? 0.55;
-    tokens.push(`rate=${rateVal}`);
-    if (parsedWorking?.countCap !== null && parsedWorking?.countCap !== undefined) {
-      tokens.push(`count=${parsedWorking.countCap}`);
-    }
-    if (parsedWorking?.durOverride !== null && parsedWorking?.durOverride !== undefined) {
-      tokens.push(`dur=${parsedWorking.durOverride}`);
-    }
-    const walls = parsedWorking?.walls ?? "none";
-    if (walls !== "none") tokens.push(`walls=${walls}`);
-    const wallAmp = parseFloat(getField("wallAmp"));
-    if (Number.isFinite(wallAmp) && wallAmp >= 0 && wallAmp <= 0.5 && walls === "zigzag") {
-      tokens.push(`wallAmp=${wallAmp}`);
-    }
-    const wallPeriod = parseFloat(getField("wallPeriod"));
-    if (Number.isFinite(wallPeriod) && wallPeriod > 0.05 && walls === "zigzag") {
-      tokens.push(`wallPeriod=${wallPeriod}`);
-    }
-
-    const safeCol = getField("safeCol");
-    if (safeCol === "none") tokens.push("safeCol=none");
-    else if (safeCol !== "random" && safeCol !== "") {
-      const n = parseInt(safeCol, 10);
-      if (Number.isFinite(n) && n >= 0 && n <= 8) tokens.push(`safeCol=${n}`);
-    }
-
-    const origin = getRadio("origin");
-    if (origin && origin !== "top") tokens.push(`origin=${origin}`);
-    const dir = parseFloat(getField("dir"));
-    if (Number.isFinite(dir) && dir !== 0) tokens.push(`dir=${dir}`);
-
-    // Cluster mix lives outside the form (basic view) — read straight
-    // from editorDialogPctValues. Skip writing pct= when the row is
-    // pure normal=100 so the DSL stays clean.
-    const kinds: ClusterKind[] = ["normal", "sticky", "slow", "fast", "coin", "shield", "drone"];
+    // Compose final DSL from the parsed working wave + the user's mix.
+    const tokens = composeWaveLine(parsedWorking).split(", ");
+    const KINDS: ClusterKind[] = ["normal", "sticky", "slow", "fast", "coin", "shield", "drone", "tiny", "big"];
     const mix = this.editorDialogPctValues;
     const pctParts: string[] = [];
     let hasNonDefault = false;
-    for (const k of kinds) {
+    for (const k of KINDS) {
       const v = Math.max(0, Math.round(mix[k] ?? 0));
       if (v > 0) pctParts.push(`${k}:${v}`);
       if ((k === "normal" && v !== 100) || (k !== "normal" && v > 0)) hasNonDefault = true;
@@ -3052,25 +3828,16 @@ export class Game {
     if (hasNonDefault && pctParts.length > 0) {
       tokens.push(`pct=${pctParts.join(",")}`);
     }
-
-    // Append slot tokens from the original line (phase 1: read-only).
-    if (parsedExisting && parsedExisting.slots.length > 0) {
-      for (const s of parsedExisting.slots) {
-        if (s === null) tokens.push("000");
-        else tokens.push(`${s.size}${s.col}${s.angleIdx}`);
-      }
-    }
-
     const newLine = tokens.join(", ");
 
     // Validate before applying.
-    try {
-      parseWaveLine(newLine);
-    } catch (e) {
-      const errEl = dlg.querySelector<HTMLElement>(".editor-dialog-err");
+    try { parseWaveLine(newLine); }
+    catch (e) {
+      const dlg = this.overlay.querySelector<HTMLElement>(".editor-dialog");
       const msg = `Invalid: ${(e as Error).message}`;
+      const errEl = dlg?.querySelector<HTMLElement>(".editor-dialog-err");
       if (errEl) errEl.textContent = msg;
-      else dlg.insertAdjacentHTML("afterbegin", `<div class="editor-dialog-err">${escapeHtml(msg)}</div>`);
+      else dlg?.insertAdjacentHTML("afterbegin", `<div class="editor-dialog-err">${escapeHtml(msg)}</div>`);
       return;
     }
 
@@ -3089,7 +3856,7 @@ export class Game {
     this.editorDialogPresetValues = {};
     this.editorDialogWaveLine = "";
     this.editorDialogPctValues = {
-      normal: 100, sticky: 0, slow: 0, fast: 0, coin: 0, shield: 0, drone: 0,
+      normal: 100, sticky: 0, slow: 0, fast: 0, coin: 0, shield: 0, drone: 0, tiny: 0, big: 0,
     };
     this.renderEditorEdit();
   }
@@ -3100,33 +3867,24 @@ export class Game {
     const diffBtns = [1, 2, 3, 4, 5]
       .map((d) => `<button type="button" class="editor-diff-btn${c.difficulty === d ? " selected" : ""}" data-dialog-difficulty="${d}">${d}</button>`)
       .join("");
+    const fmtSec = (v: number) => v.toFixed(1);
+    const fmtInt = (v: number) => String(Math.round(v));
     return `
       <div class="editor-dialog-backdrop" data-action="editor-dialog-cancel"></div>
       <div class="editor-dialog editor-dialog-settings" role="dialog" aria-label="Challenge settings">
         <h2>Options</h2>
         <div class="editor-dialog-body">
-          <label class="editor-field">
-            <span class="editor-field-label">Slow duration (s)${helpTipHtml("slowDuration")}</span>
-            <input type="number" min="0" max="30" step="0.5" data-settings-field="slowDuration" value="${c.effects.slowDuration}"/>
-          </label>
-          <label class="editor-field">
-            <span class="editor-field-label">Fast duration (s)${helpTipHtml("fastDuration")}</span>
-            <input type="number" min="0" max="30" step="0.5" data-settings-field="fastDuration" value="${c.effects.fastDuration}"/>
-          </label>
-          <label class="editor-field">
-            <span class="editor-field-label">Shield duration (s)${helpTipHtml("shieldDuration")}</span>
-            <input type="number" min="0" max="60" step="0.5" data-settings-field="shieldDuration" value="${c.effects.shieldDuration}"/>
-          </label>
-          <label class="editor-field">
-            <span class="editor-field-label">Drone duration (s)${helpTipHtml("droneDuration")}</span>
-            <input type="number" min="0" max="60" step="0.5" data-settings-field="droneDuration" value="${c.effects.droneDuration}"/>
-          </label>
+          ${this.renderSettingsStepper("slowDuration", "Slow duration (s)", c.effects.slowDuration, { min: 0, max: 30, step: 0.5, format: fmtSec })}
+          ${this.renderSettingsStepper("fastDuration", "Fast duration (s)", c.effects.fastDuration, { min: 0, max: 30, step: 0.5, format: fmtSec })}
+          ${this.renderSettingsStepper("shieldDuration", "Shield duration (s)", c.effects.shieldDuration, { min: 0, max: 60, step: 0.5, format: fmtSec })}
+          ${this.renderSettingsStepper("droneDuration", "Drone duration (s)", c.effects.droneDuration, { min: 0, max: 60, step: 0.5, format: fmtSec })}
+          ${this.renderSettingsStepper("dangerSize", "Danger size", c.effects.dangerSize, { min: 2, max: 15, step: 1, format: fmtInt })}
           <fieldset class="editor-radio-group">
             <legend>Star thresholds${helpTipHtml("starsAuto")}</legend>
             <div class="editor-stars-row">
-              <label class="editor-field"><span class="editor-field-label">★${helpTipHtml("starOne")}</span><input type="number" min="0" step="1" data-settings-field="starOne" value="${c.stars.one}"/></label>
-              <label class="editor-field"><span class="editor-field-label">★★${helpTipHtml("starTwo")}</span><input type="number" min="0" step="1" data-settings-field="starTwo" value="${c.stars.two}"/></label>
-              <label class="editor-field"><span class="editor-field-label">★★★${helpTipHtml("starThree")}</span><input type="number" min="0" step="1" data-settings-field="starThree" value="${c.stars.three}"/></label>
+              ${this.renderSettingsStepper("starOne", "★", c.stars.one, { min: 0, max: 9999, step: 5, format: fmtInt })}
+              ${this.renderSettingsStepper("starTwo", "★★", c.stars.two, { min: 0, max: 9999, step: 5, format: fmtInt })}
+              ${this.renderSettingsStepper("starThree", "★★★", c.stars.three, { min: 0, max: 9999, step: 5, format: fmtInt })}
             </div>
             <button type="button" class="challenge-back editor-auto-btn" data-action="editor-settings-auto">Auto-suggest</button>
           </fieldset>
@@ -3144,24 +3902,74 @@ export class Game {
     `;
   }
 
+  // Settings dialog stepper — same visual as the basic / advanced
+  // steppers but mutates editingCustom.effects / .stars directly via
+  // bumpSettingsField. OK persists to localStorage; Cancel discards.
+  private renderSettingsStepper(
+    field: string,
+    label: string,
+    value: number,
+    opts: { min: number; max: number; step: number; format: (v: number) => string },
+  ): string {
+    const eps = opts.step * 0.001;
+    const atMin = value <= opts.min + eps;
+    const atMax = value >= opts.max - eps;
+    return `
+      <div class="editor-quick-row">
+        <span class="editor-quick-label">${escapeHtml(label)}${helpTipHtml(field)}</span>
+        <div class="editor-quick-controls">
+          <button type="button" class="editor-mix-step editor-mix-minus"
+            data-action="editor-settings-bump" data-field="${field}" data-delta="${-opts.step}"
+            ${atMin ? "disabled" : ""}>−</button>
+          <span class="editor-mix-value">${opts.format(value)}</span>
+          <button type="button" class="editor-mix-step editor-mix-plus"
+            data-action="editor-settings-bump" data-field="${field}" data-delta="${opts.step}"
+            ${atMax ? "disabled" : ""}>+</button>
+        </div>
+      </div>
+    `;
+  }
+
+  private bumpSettingsField(field: string, delta: number): void {
+    const c = this.editingCustom;
+    if (!c) return;
+    switch (field) {
+      case "slowDuration":
+        c.effects.slowDuration = clampRound(c.effects.slowDuration + delta, 0, 30, 0.5);
+        break;
+      case "fastDuration":
+        c.effects.fastDuration = clampRound(c.effects.fastDuration + delta, 0, 30, 0.5);
+        break;
+      case "shieldDuration":
+        c.effects.shieldDuration = clampRound(c.effects.shieldDuration + delta, 0, 60, 0.5);
+        break;
+      case "droneDuration":
+        c.effects.droneDuration = clampRound(c.effects.droneDuration + delta, 0, 60, 0.5);
+        break;
+      case "dangerSize":
+        c.effects.dangerSize = Math.max(2, Math.min(15, Math.round(c.effects.dangerSize + delta)));
+        break;
+      case "starOne":
+        c.stars.one = Math.max(0, Math.round(c.stars.one + delta));
+        break;
+      case "starTwo":
+        c.stars.two = Math.max(0, Math.round(c.stars.two + delta));
+        break;
+      case "starThree":
+        c.stars.three = Math.max(0, Math.round(c.stars.three + delta));
+        break;
+    }
+    this.renderEditorEdit();
+  }
+
   private applySettingsDialog(): void {
     const c = this.editingCustom;
     if (!c) return;
+    // Numeric fields are live-mutated by the steppers — only the
+    // difficulty selection still lives in the DOM (`.selected` class
+    // on the picker buttons), so reconcile that on OK.
     const dlg = this.overlay.querySelector<HTMLElement>(".editor-dialog");
-    if (!dlg) return;
-    const getNum = (name: string, fallback: number): number => {
-      const el = dlg.querySelector<HTMLInputElement>(`[data-settings-field="${name}"]`);
-      const n = parseFloat(el?.value ?? "");
-      return Number.isFinite(n) && n >= 0 ? n : fallback;
-    };
-    c.effects.slowDuration = getNum("slowDuration", c.effects.slowDuration);
-    c.effects.fastDuration = getNum("fastDuration", c.effects.fastDuration);
-    c.effects.shieldDuration = getNum("shieldDuration", c.effects.shieldDuration);
-    c.effects.droneDuration = getNum("droneDuration", c.effects.droneDuration);
-    c.stars.one = Math.max(0, Math.round(getNum("starOne", c.stars.one)));
-    c.stars.two = Math.max(0, Math.round(getNum("starTwo", c.stars.two)));
-    c.stars.three = Math.max(0, Math.round(getNum("starThree", c.stars.three)));
-    const diffSel = dlg.querySelector<HTMLButtonElement>(".editor-diff-btn.selected");
+    const diffSel = dlg?.querySelector<HTMLButtonElement>(".editor-diff-btn.selected");
     if (diffSel) {
       const d = parseInt(diffSel.dataset.dialogDifficulty ?? String(c.difficulty), 10);
       if (d >= 1 && d <= 5) c.difficulty = d as 1 | 2 | 3 | 4 | 5;
@@ -3176,16 +3984,10 @@ export class Game {
     if (!c) return;
     const def = toChallengeDef(c);
     const t = computeStarThresholds(def);
-    // Update the dialog inputs in place so the user can still adjust.
-    const dlg = this.overlay.querySelector<HTMLElement>(".editor-dialog");
-    if (!dlg) return;
-    const setVal = (name: string, value: number) => {
-      const el = dlg.querySelector<HTMLInputElement>(`[data-settings-field="${name}"]`);
-      if (el) el.value = String(value);
-    };
-    setVal("starOne", t.one);
-    setVal("starTwo", t.two);
-    setVal("starThree", t.three);
+    c.stars.one = t.one;
+    c.stars.two = t.two;
+    c.stars.three = t.three;
+    this.renderEditorEdit();
   }
 
   // Estimate a difficulty rating (1..5) by walking the wave list and
@@ -3238,7 +4040,9 @@ export class Game {
     const diff = Math.max(1, Math.min(5, Math.round(score))) as 1 | 2 | 3 | 4 | 5;
 
     // Update both the dialog UI and the working model so OK can read
-    // the selected button as before.
+    // the selected button as before. Also mutate editingCustom so the
+    // suggestion persists if the user closes the dialog without OK.
+    if (this.editingCustom) this.editingCustom.difficulty = diff;
     const dlg = this.overlay.querySelector<HTMLElement>(".editor-dialog");
     if (!dlg) return;
     dlg.querySelectorAll<HTMLButtonElement>(".editor-diff-btn").forEach((b) => {
@@ -3313,6 +4117,7 @@ export class Game {
     this.setScoreVisible(false);
     this.setPauseButtonVisible(false);
     this.setHudVisible(false);
+    this.setInPlay(false);
     this.renderChallengeSelect();
     this.overlay.classList.remove("hidden");
     // Kick off the StoreKit product fetch the first time the player visits
@@ -3331,6 +4136,7 @@ export class Game {
     this.activeChallenge = def;
     this.state = "challengeIntro";
     this.setHudVisible(false);
+    this.setInPlay(false);
     this.renderChallengeIntro();
   }
 
@@ -3339,6 +4145,7 @@ export class Game {
     this.state = "playing";
     this.overlay.classList.add("hidden");
     this.setHudVisible(true);
+    this.setInPlay(true);
     this.setScoreVisible(true);
     this.setPauseButtonVisible(true);
     this.setSliderEnabled(true);
@@ -3463,7 +4270,7 @@ export class Game {
     // and IAP banner. Shown once the IAP is owned (or in debug mode),
     // since the editor is gated behind that — no point showing an empty
     // section to players who can't author challenges yet.
-    if (progress.purchasedUnlock || this.debugEnabled) {
+    if (progress.purchasedUnlock || this.debugEnabled || this.isEditorTempUnlocked()) {
       const customs = listCustomChallenges();
       if (customs.length > 0) {
         const customCards = customs.map((c) => {
@@ -3611,6 +4418,7 @@ export class Game {
     this.overlay.classList.remove("hidden");
     this.setScoreVisible(false);
     this.setHudVisible(false);
+    this.setInPlay(false);
 
     // Animation timing: bar fills 0 → fillPct over BAR_DURATION_MS. Each
     // earned star pops the instant the fill visually crosses its tier
@@ -3649,10 +4457,27 @@ export class Game {
     });
   }
 
+  // TEMP — see EDITOR_TEMP_UNLOCKED_ON_IOS at the top of this file.
+  private isEditorTempUnlocked(): boolean {
+    return EDITOR_TEMP_UNLOCKED_ON_IOS && isStoreKitAvailable();
+  }
+
   private setSliderEnabled(enabled: boolean): void {
     const movePadEl = document.getElementById("movepad");
     if (!movePadEl) return;
     movePadEl.classList.toggle("disabled", !enabled);
+  }
+
+  // Toggle a body-level `in-play` class so CSS can hide the bottom
+  // position slider (and any future game-only chrome) on every menu /
+  // editor screen — they don't accept input there anyway.
+  private setInPlay(active: boolean): void {
+    document.body.classList.toggle("in-play", active);
+    // Snap the knob to centre at the start of every run so the
+    // slider doesn't carry over the previous run's position. The
+    // knob position is a CSS variable resolved against the pad's
+    // current width — no need to wait for layout, no polling.
+    if (active) this.sliderHandle?.refresh(0);
   }
 
   private pauseGame(): void {
@@ -3969,43 +4794,22 @@ export class Game {
       });
     }
 
-    if (
-      this.state === "menu" ||
-      this.state === "challengeSelect" ||
-      this.state === "challengeIntro" ||
-      this.state === "unlockShop" ||
-      this.state === "blocksGuide"
-    ) {
-      // Pre-game test drive: accept input + step physics so the player can
-      // try out the controls. No spawning, no scoring, no wave system.
-      this.applyMovementInput();
-      Engine.update(this.engine, Math.min(dt * 1000, 1000 / 30));
-      this.player.clampToRail(this.playerY);
-      {
-        const r = this.playerRailBounds();
-        this.player.clampBoundsX(r.left, r.right);
-      }
-      this.player.update(dt);
-      return;
-    }
-
-    // Editor wave-dialog preview: simulate the working wave on the
-    // canvas behind the dialog. No player, no scoring; the loop just
-    // restarts when the wave's end conditions fire.
+    // The simulation only runs when there's something to simulate:
+    //   - Editor wave dialog with the live preview active.
+    //   - Active gameplay (playing / paused — handled below).
+    // Every other state (main menu, challenge select / intro / complete,
+    // gameover, unlock shop, blocks guide, editor home, editor edit
+    // without preview) returns early so the engine sits idle and no
+    // wreckage / practice clusters lurk behind the overlay.
     if ((this.state === "editorEdit" || this.state === "editorHome") && this.editorDialogPreview) {
+      this.clampChallengeFallVelocities();
       Engine.update(this.engine, Math.min(dt * 1000, 1000 / 30));
       this.cleanupOffscreenBodies();
       this.tickWalls(dt);
       this.tickWavePreview(dt);
       return;
     }
-
-    if (this.state === "gameover" || this.state === "challengeComplete") {
-      // After death (or completion), keep stepping physics + clusters + debris
-      // so the wreckage / leftover clusters tumble behind the overlay. No
-      // input, no spawning, no lose-check.
-      Engine.update(this.engine, Math.min(dt * 1000, 1000 / 30));
-      this.cleanupOffscreenBodies();
+    if (this.state !== "playing") {
       return;
     }
 
@@ -4101,7 +4905,7 @@ export class Game {
     this.applyMovementInput(effectiveScale);
 
     const playerSize = this.player.size();
-    const dangerSize = this.cfg().dangerSize;
+    const dangerSize = this.dangerSize();
     this.player.inDanger = playerSize >= dangerSize;
 
     // Survivor: was in danger and clawed back to a single hex.
@@ -4142,6 +4946,10 @@ export class Game {
       this.progressDisplayed += (this.progress - this.progressDisplayed) * (1 - Math.exp(-dt * 6));
       if (this.waveBumpT > 0) this.waveBumpT = Math.max(0, this.waveBumpT - dt);
     }
+
+    // Re-apply target fall velocity for challenge clusters so gravity
+    // doesn't drift them off-spec. No-op in endless mode (no targetVy).
+    this.clampChallengeFallVelocities();
 
     // Step physics with scaled time.
     Engine.update(this.engine, Math.min(gameDt * 1000, 1000 / 30));
@@ -4603,6 +5411,26 @@ export class Game {
         // carry-over from physics momentum.
         this.player.setAngularVelocity(0);
       }
+    }
+  }
+
+  // Cap challenge cluster fall velocities at their `targetVy` each frame
+  // so Matter's gravity can't accelerate them past the designer's
+  // `speed=` value. Soft clamp: only caps when gravity has pushed v.y
+  // above target; collisions that slow or bounce a cluster upward are
+  // left alone (gravity will recover them gradually). Horizontal
+  // velocity is always preserved so side entries, tilt, and post-
+  // collision shove still play out. Endless-mode clusters have
+  // targetVy === null and are skipped.
+  private clampChallengeFallVelocities(): void {
+    if (this.clusters.length === 0) return;
+    for (const c of this.clusters) {
+      if (!c.alive) continue;
+      const target = c.targetVy;
+      if (target === null) continue;
+      const v = c.body.velocity;
+      if (v.y <= target + 0.01) continue;
+      Body.setVelocity(c.body, { x: v.x, y: target });
     }
   }
 
@@ -5149,7 +5977,7 @@ export class Game {
     // Snapshot pre-hit size so the lose check only counts hits taken while
     // already in the danger zone. Otherwise a fast 5→6→7 combo would end
     // the run before the danger glow ever appears.
-    const wasInDanger = this.player.size() >= this.cfg().dangerSize;
+    const wasInDanger = this.player.size() >= this.dangerSize();
 
     // Bigger blocks bite harder, but a notch gentler than sticky removes:
     // 1–3 hex clusters stick 1, 4 sticks 2, 5 sticks 3 (max(1, N-2)). Each
@@ -5927,12 +6755,15 @@ export class Game {
   }
 
   // Convert a slot to actual spawn parameters and spawn a normal cluster.
-  private spawnFromSlot(slot: { size: number; col: number; angleIdx: number }, wave: ParsedWave): void {
+  private spawnFromSlot(slot: { size: number; col: number; angleIdx: number; kind?: ClusterKind }, wave: ParsedWave): void {
     const sizeRaw = Math.max(1, Math.min(5, slot.size));
     let size = sizeRaw;
     // Narrow walls can't fit size-4+ polyhexes through the corridor; clamp.
     if (wave.walls === "narrow" && size >= 3) size = 2;
-    const shape = buildPolyhexShape(size, this.rng);
+    const kind: ClusterKind = slot.kind ?? "normal";
+    // Pickups are always single-hex regardless of the requested size.
+    const isPickup = kind === "coin" || kind === "shield" || kind === "drone";
+    const shape = isPickup ? COIN_SHAPE : buildPolyhexShape(size, this.rng);
 
     const angle = ANGLE_TABLE[Math.max(0, Math.min(9, slot.angleIdx))] as {
       tilt: number;
@@ -5951,8 +6782,10 @@ export class Game {
     const railCenter = (railLeft + railRight) / 2;
     // Challenge mode uses a clean base (no score ramp, no wave-phase
     // variance) so each `speed=` token in the DSL means exactly what
-    // the designer wrote.
-    const speed = Math.min(MAX_FALL_SPEED, BASE_FALL_SPEED * wave.baseSpeedMul);
+    // the designer wrote. The cluster's targetVy is re-applied each
+    // frame in update() so gravity can't drive slow waves up to
+    // terminal velocity.
+    const speed = Math.min(CHALLENGE_MAX_FALL_SPEED, CHALLENGE_BASE_FALL_SPEED * wave.baseSpeedMul);
 
     let x: number;
     let y: number;
@@ -5986,7 +6819,7 @@ export class Game {
       vy = Math.cos(tilt) * speed;
     }
 
-    const cluster = this.spawnChallengeCluster("normal", shape, x, y, vx, vy);
+    const cluster = this.spawnChallengeCluster(kind, shape, x, y, vx, vy);
     if (cluster && sideEntryFromLeft !== null) {
       this.sideWarnings.push({ cluster, side: sideEntryFromLeft ? "left" : "right", age: 0, lifetime: 0.7 });
     }
@@ -6027,8 +6860,10 @@ export class Game {
     const y = this.boardOriginY - this.hexSize * 4;
     // Challenge mode uses a clean base (no score ramp, no wave-phase
     // variance) so each `speed=` token in the DSL means exactly what
-    // the designer wrote.
-    const speed = Math.min(MAX_FALL_SPEED, BASE_FALL_SPEED * wave.baseSpeedMul);
+    // the designer wrote. The cluster's targetVy is re-applied each
+    // frame in update() so gravity can't drive slow waves up to
+    // terminal velocity.
+    const speed = Math.min(CHALLENGE_MAX_FALL_SPEED, CHALLENGE_BASE_FALL_SPEED * wave.baseSpeedMul);
     const tilt = wave.defaultDir;
     const vx = Math.sin(tilt) * speed;
     const vy = Math.cos(tilt) * speed;
@@ -6056,6 +6891,11 @@ export class Game {
       initialSpin: (this.rng() - 0.5) * 0.08,
     });
     Body.setVelocity(cluster.body, { x: vx, y: vy });
+    // Lock the fall velocity so gravity can't accelerate it past the
+    // designer's intent. update() re-applies this each step. Side-entry
+    // clusters have a horizontal entry vector; we lock |total| so the
+    // angle stays as designed and the cluster doesn't slow down mid-air.
+    cluster.targetVy = vy;
     cluster.body.collisionFilter.category = CAT_CLUSTER;
     cluster.body.collisionFilter.mask = CAT_PLAYER | CAT_CLUSTER | CAT_DRONE;
     for (let i = 1; i < cluster.body.parts.length; i++) {
@@ -6309,6 +7149,16 @@ export class Game {
   // The active difficulty's tunable bundle.
   private cfg(): DifficultyConfig {
     return DIFFICULTY_CONFIG[this.difficulty];
+  }
+
+  // Danger threshold: the player size at which the red glow appears
+  // and a blue hit becomes lethal. Custom challenges can override the
+  // per-difficulty value via effects.dangerSize so authors can tune
+  // the failure margin per challenge.
+  private dangerSize(): number {
+    const override = this.effectOverrides?.dangerSize;
+    if (typeof override === "number" && override > 0) return override;
+    return this.cfg().dangerSize;
   }
 
   private setDifficulty(d: Difficulty): void {
@@ -7214,6 +8064,7 @@ const FIELD_HELP: Record<string, string> = {
   fastDuration: "Seconds of 1.25x time + bonus pool after picking up a FAST block.",
   shieldDuration: "Seconds of bubble protection after picking up a SHIELD block.",
   droneDuration: "Seconds the drone sentinel stays active after pickup.",
+  dangerSize: "How big your blob can grow before the danger glow appears and the next blue hit ends the run. Lower = harder.",
   starOne: "Score required for 1 star.",
   starTwo: "Score required for 2 stars.",
   starThree: "Score required for 3 stars.",
@@ -7263,10 +8114,18 @@ function composeWaveLine(w: ParsedWave): string {
   if (w.defaultDir !== 0) tokens.push(`dir=${w.defaultDir}`);
   for (const s of w.slots) {
     if (s === null) tokens.push("000");
-    else tokens.push(`${s.size}${s.col}${s.angleIdx}`);
+    else tokens.push(`${slotKindToPrefix(s.kind)}${s.size}${s.col}${s.angleIdx}`);
   }
   return tokens.join(", ");
 }
+
+// Hard cap on rows in the Custom Wave editor. Each row maps to one slot
+// token in the DSL output (skipped rows emit "000").
+const CUSTOM_WAVE_LEN = 30;
+
+const CUSTOM_WAVE_KINDS: ClusterKind[] = [
+  "normal", "sticky", "slow", "fast", "coin", "shield", "drone", "tiny", "big",
+];
 
 const WALL_CYCLE: WallKind[] = ["none", "pinch", "zigzag", "narrow"];
 const WALL_LABEL: Record<WallKind, string> = {
@@ -7305,7 +8164,7 @@ function checkWaveLine(line: string): { ok: true } | { ok: false; reason: string
 // map. Used when opening the wave dialog on an existing wave so the
 // cluster mix block reflects the wave's current weights.
 function parseLineToMix(line: string): Partial<Record<ClusterKind, number>> {
-  const KINDS: ClusterKind[] = ["normal", "sticky", "slow", "fast", "coin", "shield", "drone"];
+  const KINDS: ClusterKind[] = ["normal", "sticky", "slow", "fast", "coin", "shield", "drone", "tiny", "big"];
   const out: Partial<Record<ClusterKind, number>> = {};
   for (const k of KINDS) out[k] = 0;
   let parsed: ParsedWave | null = null;
@@ -7333,6 +8192,28 @@ function parseLineToMix(line: string): Partial<Record<ClusterKind, number>> {
 }
 
 
+// CSS rotation to apply to the small `↓` arrow that visualises a slot's
+// angle in the custom-wave grid. ANGLE_TABLE tilts are radians; CSS
+// rotate is clockwise, so for `↓` (head pointing down) a positive
+// rotation pushes the head left. Right-motion (positive tilt) needs a
+// negative CSS rotation; left-motion needs positive. Negate to map.
+function angleToCssRotation(angleIdx: number): number {
+  const tilts = [0, -0.15, 0.15, -0.35, 0.35, -0.6, 0.6, -0.4, 0.4, 0];
+  const tilt = tilts[Math.max(0, Math.min(9, angleIdx))] ?? 0;
+  return -tilt * (180 / Math.PI);
+}
+
+// Clamp a numeric value into [min, max] and round to the nearest
+// `step`. Used by the Advanced steppers so each bump lands on a clean
+// value (e.g., speed 1.20 → 1.25, never 1.249999).
+function clampRound(v: number, min: number, max: number, step: number): number {
+  const clamped = Math.max(min, Math.min(max, v));
+  const snapped = Math.round(clamped / step) * step;
+  // Avoid float jitter — snap to step's decimal precision.
+  const decimals = Math.max(0, -Math.floor(Math.log10(step)));
+  return Number(snapped.toFixed(decimals));
+}
+
 function escapeHtml(s: string): string {
   return s
     .replace(/&/g, "&amp;")
@@ -7346,6 +8227,109 @@ function escapeHtml(s: string): string {
 // look so the BLOCKS guide stays visually consistent with the actual
 // clusters: hex outline for "normal", a glowing blob for the helpful
 // kinds, an ellipsoidal coin face for "coin".
+// Paint a polyhex preview for the cell picker's size buttons. Pickup
+// kinds (coin / shield / drone) are always single-cell regardless of
+// `size`. Other kinds render their actual N-cell polyhex via
+// buildPolyhexShape (deterministic per (kind, size) so the same size
+// button always shows the same shape).
+function drawClusterShapeIcon(canvas: HTMLCanvasElement, kind: ClusterKind, size: number): void {
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  const w = canvas.width;
+  const h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+  const isPickup = kind === "coin" || kind === "shield" || kind === "drone";
+  if (isPickup || size <= 1) {
+    drawBlockIcon(canvas, kind);
+    return;
+  }
+  const shape = buildPolyhexShape(size, mulberry32(0x42 + size));
+  // Compute bounding box in pixel coords so we can centre + scale.
+  const SQRT3 = Math.sqrt(3);
+  const pts = shape.map((c) => ({
+    x: SQRT3 * (c.q + c.r / 2),
+    y: 1.5 * c.r,
+  }));
+  const xs = pts.map((p) => p.x);
+  const ys = pts.map((p) => p.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  // The bounding box is in units of "1 hex size". Add hex radius (1)
+  // worth of margin on each side so cells don't clip at the edge.
+  const bbW = maxX - minX + SQRT3;
+  const bbH = maxY - minY + 2;
+  const scale = Math.min((w * 0.78) / bbW, (h * 0.78) / bbH);
+  const hexR = scale;
+  const cxOff = w / 2 - ((minX + maxX) / 2) * scale;
+  const cyOff = h / 2 - ((minY + maxY) / 2) * scale;
+  for (const p of pts) {
+    const px = cxOff + p.x * scale;
+    const py = cyOff + p.y * scale;
+    paintCellOnCanvas(ctx, px, py, hexR, kind);
+  }
+}
+
+// Paint a single cluster cell (hex / coin disc / blob) at (cx, cy).
+// Mirrors drawBlockIcon's per-kind branches but parameterised by the
+// hex radius so the polyhex preview stays in scale.
+function paintCellOnCanvas(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  r: number,
+  kind: ClusterKind,
+): void {
+  if (kind === "coin") {
+    const grad = ctx.createRadialGradient(cx - r * 0.3, cy - r * 0.3, 0, cx, cy, r);
+    grad.addColorStop(0, "#fff1c2");
+    grad.addColorStop(0.45, "#ffb255");
+    grad.addColorStop(1, "#a14e08");
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "rgba(255, 240, 200, 0.95)";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    return;
+  }
+  if (kind === "normal") {
+    pathHex(ctx, cx, cy, r);
+    const grad = ctx.createLinearGradient(0, cy - r, 0, cy + r);
+    grad.addColorStop(0, "#aac4ff");
+    grad.addColorStop(1, "#5b8bff");
+    ctx.fillStyle = grad;
+    ctx.fill();
+    ctx.lineWidth = 1.2;
+    ctx.strokeStyle = "#1c2348";
+    ctx.stroke();
+    return;
+  }
+  // Helpful kinds — small blob.
+  const palette = blobPalette(kind);
+  ctx.save();
+  ctx.globalCompositeOperation = "lighter";
+  const halo = ctx.createRadialGradient(cx, cy, 0, cx, cy, r * 1.6);
+  halo.addColorStop(0, palette.haloInner);
+  halo.addColorStop(0.55, palette.haloMid);
+  halo.addColorStop(1, "rgba(0,0,0,0)");
+  ctx.fillStyle = halo;
+  ctx.beginPath();
+  ctx.arc(cx, cy, r * 1.6, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+  const core = ctx.createRadialGradient(cx - r * 0.3, cy - r * 0.3, 0, cx, cy, r * 0.85);
+  core.addColorStop(0, palette.coreLight);
+  core.addColorStop(1, palette.coreDark);
+  ctx.fillStyle = core;
+  ctx.beginPath();
+  ctx.arc(cx, cy, r * 0.85, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.55)";
+  ctx.lineWidth = 1;
+  ctx.stroke();
+}
+
 function drawBlockIcon(canvas: HTMLCanvasElement, kind: ClusterKind): void {
   const ctx = canvas.getContext("2d");
   if (!ctx) return;

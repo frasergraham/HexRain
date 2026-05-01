@@ -15,6 +15,14 @@ export class FallingCluster {
   // while it falls. Set by Game when this is the first cluster of its kind
   // ever played on this device.
   hintLabel: string | null = null;
+  // Constant fall velocity (px/step). Set on challenge spawns so the
+  // engine re-applies it each frame, overriding gravity. This is the
+  // mechanism that makes `speed=` in the wave DSL actually mean what
+  // it says — without it, gravity drives every cluster to ~20 px/step
+  // terminal velocity within half a second and the speed parameter
+  // becomes a barely-perceptible nudge to the first few frames.
+  // Endless mode leaves this null so gravity behaves normally.
+  targetVy: number | null = null;
 
   constructor(body: Body, kind: ClusterKind, partAxial: Map<number, Axial>) {
     this.body = body;

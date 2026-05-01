@@ -17,6 +17,9 @@ export interface CustomChallengeEffects {
   fastDuration: number;
   shieldDuration: number;
   droneDuration: number;
+  /** Player size at which the danger glow appears and a blue hit
+   *  becomes lethal. Default 7; lower = harder. */
+  dangerSize: number;
 }
 
 export interface CustomChallengeStars {
@@ -50,6 +53,7 @@ const DEFAULT_EFFECTS: CustomChallengeEffects = {
   fastDuration: 5,
   shieldDuration: 10,
   droneDuration: 10,
+  dangerSize: 7,
 };
 
 const EMPTY_STORE: CustomChallengeStore = { v: 1, challenges: [] };
@@ -95,6 +99,7 @@ function fillDefaults(c: Partial<CustomChallenge>): CustomChallenge {
       fastDuration: numOr(c.effects?.fastDuration, DEFAULT_EFFECTS.fastDuration),
       shieldDuration: numOr(c.effects?.shieldDuration, DEFAULT_EFFECTS.shieldDuration),
       droneDuration: numOr(c.effects?.droneDuration, DEFAULT_EFFECTS.droneDuration),
+      dangerSize: numOr(c.effects?.dangerSize, DEFAULT_EFFECTS.dangerSize),
     },
     stars: {
       one: numOr(c.stars?.one, 1),

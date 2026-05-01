@@ -30,6 +30,34 @@ body {
   margin: 0 auto;
 }
 
+/* Web-only: lock the play frame to an iPhone 17 aspect ratio
+   (2622:1206 ≈ 19.5:9) and centre it against the dark page bg so
+   desktop/tablet previews match what ships on iOS. iOS's WKWebView
+   already runs full-bleed inside the device frame, so we leave the
+   native build on the default layout above. main.ts adds .web to
+   <body> when Capacitor.getPlatform() === "web".
+
+   We pin #app to a fixed design size (540 × 1174) and CSS-scale it
+   down with transform when the viewport can't fit. That keeps every
+   internal px-sized control (buttons, fonts, paddings, slider,
+   overlay layout) in its designed proportions even on a tiny
+   browser window — no internal layout breakage. Absolute
+   centring + translate avoids flexbox quirks where an oversized
+   child gets clipped instead of scaled cleanly. */
+body.web #app {
+  /* Pillarbox/letterbox to iPhone 17 aspect (1206:2622). At typical
+     desktop sizes this resolves to iPhone-sized dimensions, so the
+     internal layout is exactly what ships natively — no transform
+     scaling, no centering quirks. inset:0 + margin:auto centres in
+     both axes. */
+  position: fixed;
+  inset: 0;
+  margin: auto;
+  width: min(100vw, calc(100dvh * 1206 / 2622));
+  height: min(100dvh, calc(100vw * 2622 / 1206));
+  max-width: none;
+}
+
 .hud[hidden],
 .hud-left[hidden],
 .hud-right[hidden] {
@@ -177,7 +205,11 @@ body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
+  /* `safe center` falls back to flex-start when content is taller than
+     the overlay, so the top of long screens (challenge select, editor
+     home/edit, unlock shop) stays visible and reachable via scroll.
+     Plain `center` lets oversized content overflow off the top. */
+  justify-content: safe center;
   text-align: center;
   padding: 16px 14px;
   background: radial-gradient(
@@ -275,9 +307,17 @@ body {
 
 .moveknob {
   position: absolute;
-  /* Centred in the 88px pad; hex is 56px tall. */
+  /* Centred in the 88px pad; hex is 56px tall. Horizontal position
+     is driven by --knob-ratio (0..1, 0.5 = centre) set on the pad
+     by bindSlider. CSS-resolved so the knob tracks the pad's real
+     width automatically when the touchbar transitions from
+     display:none to flex — no JS measurement needed and no chance
+     of writing a degenerate position before layout is ready.
+     Math: knob's left edge sits at pad-inset (8px) + ratio of the
+     usable track (full width minus left/right insets and the knob's
+     own width = 100% - 64px). */
   top: calc(50% - 28px);
-  left: calc(50% - 24px);
+  left: calc(8px + var(--knob-ratio, 0.5) * (100% - 64px));
   width: 48px;
   height: 56px;
   /* Pointy-top regular hexagon (h ≈ w · 2/√3) */
@@ -386,12 +426,28 @@ body {
 
 /* --- Difficulty buttons on the menu / game-over overlay --- */
 
-.play-group {
+/* Section spacing on the main menu:
+ *   - Tagline, then play-group (difficulty + PLAY) — tight 6px gap.
+ *   - Larger 22px gap to challenge-group (CHALLENGES + CHALLENGE EDITOR).
+ *   - Larger 22px gap to achievements section.
+ * Each `.play-group` / `.challenge-group` keeps its own internal 6px
+ * gap so members read as one unit.
+ */
+.play-group,
+.challenge-group {
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 6px;
-  margin: 6px 0 4px;
+  margin: 0;
+  width: 100%;
+}
+.play-group {
+  margin-top: 6px;
+  margin-bottom: 22px;
+}
+.challenge-group {
+  margin-bottom: 22px;
 }
 
 /* In-game one-shot controls reminder. Positioned over the canvas at
@@ -796,8 +852,7 @@ body {
   background: rgba(170, 100, 220, 0.14);
   border-color: rgba(180, 130, 230, 0.55);
   box-shadow: 0 0 18px rgba(170, 100, 220, 0.22);
-  margin-top: 6px;
-  margin-bottom: 18px;
+  /* Margins removed — `.challenge-group` controls spacing now. */
 }
 
 .play-btn-secondary:hover,
@@ -1692,8 +1747,15 @@ body {
 
 .editor-home-row-actions {
   display: flex;
-  gap: 6px;
+  flex-direction: column;
+  gap: 4px;
   flex: 0 0 auto;
+  align-items: stretch;
+  min-width: 84px;
+}
+.editor-home-row-actions .editor-row-btn {
+  width: 100%;
+  text-align: center;
 }
 
 .editor-row-btn {
@@ -1955,6 +2017,7 @@ body {
   width: min(440px, calc(100% - 24px));
   max-height: calc(100% - 24px);
   overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
   background: linear-gradient(180deg, rgba(28, 34, 60, 0.98), rgba(14, 18, 36, 0.98));
   border: 1px solid rgba(120, 150, 220, 0.35);
   border-radius: 12px;
@@ -2515,16 +2578,25 @@ body {
  * any in-flight cluster wreckage) while it's open. This is set on
  * <body> by setEditorActive() in game.ts.
  */
-body.editor-active #game,
-body.editor-active .canvas-wheel,
-body.editor-active .controls-hint {
+/* Hide the play canvas everywhere except actual play: menus, editor
+ * (without preview), gameover screens, etc. Clean delineation —
+ * "in a menu" means the game is not visible / running underneath.
+ * The editor preview override above keeps the canvas visible while
+ * the wave-dialog preview is active. */
+body:not(.in-play) #game,
+body:not(.in-play) .canvas-wheel,
+body:not(.in-play) .controls-hint {
   visibility: hidden;
 }
-
-body.editor-active .stage {
+body.editor-active .stage,
+body:not(.in-play) .stage {
   background:
     radial-gradient(circle at 50% 0%, rgba(40, 56, 110, 0.35), transparent 50%),
     linear-gradient(180deg, #0d0f1c 0%, #060812 100%);
+}
+/* Editor preview re-shows the canvas (overrides the menu hide). */
+body.editor-previewing #game {
+  visibility: visible;
 }
 
 /* Editor screens should fully cover the stage so the menu's gradient
@@ -2684,18 +2756,25 @@ body.editor-previewing .overlay {
 }
 
 /* Hide the editor-edit content sitting behind the dialog (back button,
- * name/seed strip, wave list) so only the dialog + preview show. */
-body.editor-previewing .editor-edit > *:not(.editor-dialog-backdrop):not(.editor-dialog) {
+ * name/seed strip, wave list) so only the dialog + preview show. The
+ * cell-picker popup is also a child of .editor-edit (rendered as a
+ * sibling of the dialog so its position: fixed isn't trapped by the
+ * dialog's transform), so whitelist it too. */
+body.editor-previewing .editor-edit
+  > *:not(.editor-dialog-backdrop):not(.editor-dialog):not(.editor-custom-picker-backdrop):not(.editor-custom-picker) {
   visibility: hidden;
 }
 
 /* Outer dialog + section containers fully transparent. */
 body.editor-previewing .editor-dialog-wave,
+body.editor-previewing .editor-dialog-custom-wave,
 body.editor-previewing .editor-presets,
 body.editor-previewing .editor-quick,
 body.editor-previewing .editor-mix,
 body.editor-previewing .editor-advanced.open,
-body.editor-previewing .editor-dialog-body {
+body.editor-previewing .editor-dialog-body,
+body.editor-previewing .editor-custom-palette,
+body.editor-previewing .editor-custom-grid {
   background: transparent;
   border: none;
   box-shadow: none;
@@ -2710,12 +2789,42 @@ body.editor-previewing .editor-dialog-backdrop {
 
 /* === Controls (75% opaque) === */
 
-body.editor-previewing .editor-dialog-wave > h2 {
+body.editor-previewing .editor-dialog-wave > h2,
+body.editor-previewing .editor-dialog-custom-wave > h2 {
   display: inline-block;
   background: rgba(8, 10, 22, 0.75);
   padding: 5px 12px;
   border-radius: 999px;
   border: 1px solid rgba(120, 150, 220, 0.35);
+}
+
+/* Custom-wave: the palette chips and the per-row grid cells are the
+ * "controls" — make those 75% opaque while the rest of the dialog
+ * frame is transparent over the live preview. */
+body.editor-previewing .editor-custom-kind {
+  background: rgba(8, 10, 22, 0.78);
+}
+body.editor-previewing .editor-custom-kind.selected {
+  background: rgba(60, 130, 90, 0.78);
+}
+body.editor-previewing .editor-custom-row {
+  background: rgba(8, 10, 22, 0.55);
+  border-radius: 4px;
+}
+body.editor-previewing .editor-custom-cell {
+  background: rgba(20, 26, 50, 0.7);
+}
+body.editor-previewing .editor-custom-cell.has-hex {
+  background: rgba(40, 60, 110, 0.85);
+}
+body.editor-previewing .editor-custom-cell-side {
+  background: rgba(13, 15, 28, 0.78);
+}
+body.editor-previewing .editor-custom-cell-side.has-hex {
+  background: rgba(80, 60, 130, 0.85);
+}
+body.editor-previewing .editor-custom-clear {
+  background: rgba(80, 30, 40, 0.78);
 }
 
 body.editor-previewing .editor-section-toggle,
@@ -2752,4 +2861,390 @@ body.editor-previewing .editor-field-input,
 body.editor-previewing .editor-field input,
 body.editor-previewing .editor-field select {
   background: rgba(13, 15, 28, 0.75);
+}
+
+/* === Custom wave editor =====================================
+ * Slot-grid authoring view: 30 rows × (LEFT | 10 main cols | RIGHT | ×).
+ * Each row is one slot in the wave timeline; bottom row spawns first.
+ */
+
+/* Add Wave row holds the regular + custom buttons side by side. */
+.editor-add-wave-row {
+  display: flex;
+  gap: 8px;
+}
+.editor-add-wave-row .editor-add-wave {
+  flex: 1 1 0;
+  min-width: 0;
+}
+.editor-add-wave-custom {
+  border-color: rgba(220, 170, 255, 0.5);
+  color: #d8b8ff;
+}
+.editor-add-wave-custom:hover {
+  background: rgba(120, 90, 180, 0.12);
+  color: #f1d8ff;
+}
+
+/* Dialog frame: same chrome as wave dialog but wider so the 30-row
+ * grid has room. */
+.editor-dialog-custom-wave {
+  width: min(540px, calc(100% - 24px));
+}
+
+/* Palette of cluster kinds. Single horizontal row that scrolls when
+ * the dialog isn't wide enough to fit all 9 kinds. */
+.editor-custom-palette {
+  margin-bottom: 10px;
+  padding: 8px;
+  background: rgba(8, 10, 22, 0.5);
+  border: 1px solid rgba(120, 150, 220, 0.2);
+  border-radius: 8px;
+}
+.editor-custom-palette-row {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: 4px;
+}
+.editor-custom-kind {
+  appearance: none;
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  border-radius: 8px;
+  border: 1px solid rgba(120, 150, 220, 0.3);
+  background: rgba(20, 26, 50, 0.55);
+  color: #d1d8ff;
+  cursor: pointer;
+  width: 56px;
+}
+.editor-custom-kind.selected {
+  border-color: rgba(120, 220, 170, 0.8);
+  background: rgba(60, 130, 90, 0.45);
+  color: #fff;
+}
+.editor-custom-kind-icon {
+  width: 36px;
+  height: 36px;
+}
+.editor-custom-kind-label {
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+}
+
+/* 30-row grid. Each row uses CSS grid so the LEFT / MAIN strip /
+ * RIGHT / × columns line up vertically across the wave timeline. */
+.editor-custom-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  background: rgba(8, 10, 22, 0.5);
+  border: 1px solid rgba(120, 150, 220, 0.2);
+  border-radius: 8px;
+}
+.editor-custom-row {
+  display: grid;
+  grid-template-columns: 22px 1fr 22px 22px;
+  align-items: stretch;
+  gap: 2px;
+  height: 22px;
+}
+.editor-custom-row-main {
+  display: grid;
+  grid-template-columns: repeat(10, 1fr);
+  gap: 1px;
+}
+.editor-custom-cell {
+  appearance: none;
+  border: 1px solid rgba(120, 150, 220, 0.18);
+  background: rgba(20, 26, 50, 0.35);
+  color: #d1d8ff;
+  padding: 0;
+  border-radius: 3px;
+  cursor: pointer;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.editor-custom-cell:hover {
+  background: rgba(40, 60, 110, 0.45);
+}
+.editor-custom-cell.has-hex {
+  background: rgba(40, 60, 110, 0.7);
+  border-color: rgba(160, 200, 255, 0.5);
+}
+.editor-custom-cell.dragging {
+  background: rgba(80, 130, 200, 0.7);
+}
+.editor-custom-cell-side {
+  background: rgba(13, 15, 28, 0.6);
+  border-color: rgba(120, 150, 220, 0.3);
+}
+.editor-custom-cell-side.has-hex {
+  background: rgba(80, 60, 130, 0.7);
+}
+.editor-custom-cell-icon {
+  width: 18px;
+  height: 18px;
+  pointer-events: none;
+}
+.editor-custom-size {
+  position: absolute;
+  bottom: 0;
+  right: 1px;
+  font-size: 8px;
+  font-weight: 800;
+  color: #fff;
+  text-shadow: 0 0 2px #000;
+  pointer-events: none;
+}
+.editor-custom-arrow {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: 12px;
+  height: 12px;
+  transform: translateX(-50%);
+  font-size: 10px;
+  font-weight: 800;
+  color: #ffd76b;
+  text-shadow: 0 0 2px #000;
+  pointer-events: none;
+}
+.editor-custom-clear {
+  appearance: none;
+  border: 1px solid rgba(220, 130, 140, 0.3);
+  background: rgba(80, 30, 40, 0.4);
+  color: #ff8a98;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1;
+  border-radius: 3px;
+  cursor: pointer;
+  padding: 0;
+}
+.editor-custom-clear:hover { background: rgba(140, 50, 60, 0.6); color: #fff; }
+
+/* Custom-wave OPTIONS collapsible — same toggle UX as PRESET WAVES /
+ * ADVANCED on the regular wave dialog. Hidden by default; the toggle
+ * button is the only thing visible until tapped. */
+.editor-custom-options {
+  display: none;
+}
+.editor-custom-options.open {
+  display: flex;
+}
+
+/* "+ Add row" button at the top of the custom wave grid. */
+.editor-custom-addrow {
+  appearance: none;
+  width: 100%;
+  border: 2px dashed rgba(120, 150, 220, 0.45);
+  background: transparent;
+  color: #aab4dc;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  border-radius: 6px;
+  padding: 6px;
+  cursor: pointer;
+  margin-bottom: 4px;
+}
+.editor-custom-addrow:hover {
+  background: rgba(120, 150, 220, 0.08);
+  color: #e8ecff;
+}
+.editor-custom-addrow[disabled] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* CUSTOM badge in the wave-row info strip. */
+.editor-wave-info-custom {
+  background: rgba(120, 90, 180, 0.55);
+  border: 1px solid rgba(220, 170, 255, 0.6);
+  color: #f1d8ff;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-weight: 800;
+  letter-spacing: 0.18em;
+}
+
+/* === Custom-wave cell picker ===
+ * Opens when the user taps an already-placed cell. Centered popup
+ * with size + angle buttons; click outside closes. */
+.editor-custom-picker-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(8, 10, 22, 0.55);
+  z-index: 70;
+}
+.editor-custom-picker {
+  position: fixed;
+  /* `left` / `top` set by positionCustomCellPicker so the popup
+   * anchors to the clicked cell rather than viewport-centre. No
+   * transform here — that would make this a containing block for
+   * any fixed-positioned descendants. */
+  left: 0;
+  top: 0;
+  z-index: 71;
+  width: min(360px, calc(100vw - 24px));
+  max-height: calc(100vh - 24px);
+  overflow-y: auto;
+  background: linear-gradient(180deg, rgba(28, 34, 60, 0.98), rgba(14, 18, 36, 0.98));
+  border: 1px solid rgba(120, 150, 220, 0.5);
+  border-radius: 12px;
+  padding: 14px 16px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.editor-custom-picker-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.editor-custom-picker-label {
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: #aab4dc;
+}
+.editor-custom-picker-sizes {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 6px;
+}
+.editor-custom-pick-size {
+  appearance: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  border: 1px solid rgba(120, 150, 220, 0.35);
+  background: rgba(20, 26, 50, 0.55);
+  color: #d1d8ff;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.editor-custom-pick-size.selected {
+  border-color: rgba(120, 220, 170, 0.8);
+  background: rgba(60, 130, 90, 0.45);
+  color: #fff;
+}
+.editor-custom-pick-canvas {
+  width: 44px;
+  height: 44px;
+  display: block;
+}
+.editor-custom-pick-label {
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.editor-custom-picker-angles {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 4px;
+}
+.editor-custom-pick-angle {
+  appearance: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 40px;
+  border: 1px solid rgba(120, 150, 220, 0.35);
+  background: rgba(20, 26, 50, 0.55);
+  color: #d1d8ff;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.editor-custom-pick-angle.selected {
+  border-color: rgba(120, 220, 170, 0.8);
+  background: rgba(60, 130, 90, 0.45);
+  color: #fff;
+}
+.editor-custom-pick-arrow {
+  display: inline-block;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.editor-custom-picker-done {
+  margin-top: 4px;
+  align-self: stretch;
+}
+
+/* Disabled size buttons (pickup kinds — coin/shield/drone are always
+ * single-cell in-game). */
+.editor-custom-pick-size[disabled] {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+/* Advanced field row disabled (e.g. wallAmp/wallPeriod when walls
+ * isn't zigzag) — dim the whole row so the controls clearly read as
+ * inactive without removing them from layout. */
+.editor-quick-row-disabled {
+  opacity: 0.45;
+}
+.editor-quick-row-disabled .editor-quick-label {
+  color: #6b7299;
+}
+
+/* Hide the bottom position slider on every menu / editor screen —
+ * it accepts no input there. Toggled via setInPlay(). */
+body:not(.in-play) #touchbar {
+  display: none !important;
+}
+
+/* Wave edit dialogs anchor to the top of the screen (with safe-area
+ * inset for the iOS dynamic island / notch) instead of viewport
+ * centring. The custom dialog is too tall to centre comfortably and
+ * the regular dialog benefits from the same treatment for consistency.
+ * Settings keeps the default centred behaviour. */
+.editor-dialog-wave,
+.editor-dialog-custom-wave {
+  top: calc(env(safe-area-inset-top, 0px) + 12px);
+  transform: translateX(-50%);
+  max-height: calc(
+    100% - env(safe-area-inset-top, 0px)
+         - env(safe-area-inset-bottom, 0px)
+         - 24px
+  );
+  padding-bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+}
+
+/* Top bar of the wave dialogs — `← Save` button left, title centred,
+ * spacer right (mirrors challenge-select-top). The Save button just
+ * triggers the same OK action so closing the dialog persists the
+ * working line. */
+.editor-dialog-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.editor-dialog-top h2 {
+  flex: 1 1 auto;
+  margin: 0;
+  text-align: center;
+}
+.editor-dialog-top .challenge-back {
+  flex: 0 0 auto;
 }

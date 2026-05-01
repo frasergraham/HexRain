@@ -22,6 +22,10 @@ export interface ParsedSlot {
   size: number;
   col: number;
   angleIdx: number;
+  /** Cluster kind for this slot. Defaults to "normal" for legacy 3-digit
+   * slot tokens; custom-wave slots prefix the token with a letter to
+   * encode kind (e.g. `S137` = sticky, `C237` = coin). */
+  kind: ClusterKind;
 }
 
 export interface ParsedWave {
@@ -56,6 +60,9 @@ export interface ChallengeDefLike {
     droneDuration: number;
     tinyDuration: number;
     bigDuration: number;
+    /** Player size at which the danger glow appears and a blue hit
+     *  becomes lethal. Overrides the per-difficulty default. */
+    dangerSize: number;
   }>;
   waves: string[];
 }
@@ -89,8 +96,39 @@ const VALID_WALLS: ReadonlyArray<WallKind> = ["none", "pinch", "zigzag", "narrow
 
 const VALID_ORIGINS: ReadonlyArray<WaveOrigin> = ["top", "topAngled", "side"];
 
-const SLOT_RE = /^\d{3}$/;
+// Slot tokens are 3 digits (CXX), optionally prefixed with a single
+// uppercase letter that encodes the cluster kind for custom waves.
+// No prefix → "normal" (legacy roster + DSL output stays back-compat).
+const SLOT_RE = /^[A-Z]?\d{3}$/;
 const KIND_WEIGHT_RE = /^([A-Za-z]+):(-?\d+(?:\.\d+)?)$/;
+
+const SLOT_KIND_PREFIX: Readonly<Record<string, ClusterKind>> = {
+  N: "normal",
+  S: "sticky",
+  L: "slow",
+  F: "fast",
+  C: "coin",
+  H: "shield",
+  D: "drone",
+  T: "tiny",
+  B: "big",
+};
+
+const KIND_TO_SLOT_PREFIX: Readonly<Partial<Record<ClusterKind, string>>> = {
+  normal: "",
+  sticky: "S",
+  slow: "L",
+  fast: "F",
+  coin: "C",
+  shield: "H",
+  drone: "D",
+  tiny: "T",
+  big: "B",
+};
+
+export function slotKindToPrefix(kind: ClusterKind): string {
+  return KIND_TO_SLOT_PREFIX[kind] ?? "";
+}
 
 function fail(message: string, token: string): never {
   throw new Error(`Wave parse error: ${message} (token: "${token}")`);
@@ -195,12 +233,16 @@ function parsePct(value: string, token: string): Partial<Record<ClusterKind, num
 
 function parseSlot(token: string): ParsedSlot | null {
   // token has been validated against SLOT_RE before reaching here.
-  const sizeDigit = parseInt(token[0], 10);
-  const col = parseInt(token[1], 10);
-  const angleIdx = parseInt(token[2], 10);
+  const hasPrefix = token.length === 4;
+  const prefix = hasPrefix ? token[0]! : "";
+  const digits = hasPrefix ? token.slice(1) : token;
+  const sizeDigit = parseInt(digits[0]!, 10);
+  const col = parseInt(digits[1]!, 10);
+  const angleIdx = parseInt(digits[2]!, 10);
   if (sizeDigit === 0) return null;
   const size = sizeDigit > 5 ? 5 : sizeDigit;
-  return { size, col, angleIdx };
+  const kind = SLOT_KIND_PREFIX[prefix] ?? "normal";
+  return { size, col, angleIdx, kind };
 }
 
 export function parseWaveLine(line: string): ParsedWave {

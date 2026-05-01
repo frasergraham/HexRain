@@ -42,9 +42,52 @@ export function drawWavePreview(
   ctx.fillStyle = bg;
   ctx.fillRect(0, 0, w, h);
 
-  drawWalls(ctx, w, h, wave.walls, wave.wallAmp);
+  drawWalls(ctx, w, h, wave.walls, wave.wallAmp, wave.wallPeriod);
 
-  drawClusterSamples(ctx, w, h, wave);
+  // Slot-only waves (custom waves authored in the slot-grid editor)
+  // get a different render: every actual placed slot drawn at its
+  // (row, col) position so the thumbnail mirrors the timeline. Other
+  // waves use the distribution-based 20-sample render.
+  const isSlotOnly =
+    wave.slots.length > 0 && (wave.countCap === 0 || wave.countCap === null);
+  if (isSlotOnly) drawCustomWaveSlots(ctx, w, h, wave);
+  else drawClusterSamples(ctx, w, h, wave);
+}
+
+// Render the first PREVIEW_ROWS slots of a custom wave at their
+// (col, row) positions — like a piano roll. Bottom of the canvas =
+// first slot to spawn. Long waves get truncated; the thumbnail is a
+// teaser, not the full timeline.
+const CUSTOM_WAVE_PREVIEW_ROWS = 10;
+function drawCustomWaveSlots(
+  ctx: CanvasRenderingContext2D,
+  w: number,
+  h: number,
+  wave: ParsedWave,
+): void {
+  if (wave.slots.length === 0) return;
+  const visible = Math.min(wave.slots.length, CUSTOM_WAVE_PREVIEW_ROWS);
+  const COLS = 12; // 1 left side + 10 main + 1 right side
+  const padX = 4;
+  const padY = 4;
+  const cellW = (w - padX * 2) / COLS;
+  const cellH = (h - padY * 2) / visible;
+  const hexSize = Math.max(2, Math.min(cellW * 0.42, cellH * 0.55) * 0.6);
+  // Stable shape RNG — same wave produces the same polyhex layouts.
+  const seed = hashSeed(`${wave.slots.length}|${visible}|${wave.spawnInterval}`);
+  const rng = mulberry32(seed);
+  for (let i = 0; i < visible; i++) {
+    const slot = wave.slots[i];
+    if (!slot) continue;
+    let colIdx: number;
+    if (slot.angleIdx === 7) colIdx = 0;            // left side
+    else if (slot.angleIdx === 8) colIdx = COLS - 1; // right side
+    else colIdx = 1 + Math.max(0, Math.min(9, slot.col));
+    const cx = padX + cellW * (colIdx + 0.5);
+    // Slot 0 at the bottom (first to spawn), slots[visible-1] at the top.
+    const cy = h - padY - cellH * (i + 0.5);
+    drawClusterSample(ctx, cx, cy, hexSize, slot.kind, slot.size, rng);
+  }
 }
 
 // Standalone wall thumbnail for the wave dialog's walls cycler. Sizes
@@ -76,6 +119,7 @@ function drawWalls(
   h: number,
   kind: WallKind,
   amp: number,
+  period: number = 1.4,
 ): void {
   if (kind === "none") return;
   ctx.save();
@@ -104,29 +148,36 @@ function drawWalls(
   } else if (kind === "zigzag") {
     const baseInset = w * 0.12;
     const ampPx = w * Math.max(0.05, Math.min(0.25, amp));
+    // One full cycle (sin 0..2π) of parallel-shift zigzag — both walls
+    // offset by the same amount so the corridor's centre wiggles
+    // sideways while keeping its width. Closes at top and bottom.
+    // `period` only controls time-scroll in-game and doesn't apply to
+    // a static frame.
+    void period;
     ctx.strokeStyle = "rgba(220, 170, 255, 0.7)";
     ctx.lineWidth = 1.5;
     ctx.fillStyle = "rgba(170, 120, 200, 0.18)";
-    const STEPS = 12;
+    const STEPS = 32;
+    const wave = (t: number) => Math.sin(t * Math.PI * 2);
     // Left wall fill + outline.
     ctx.beginPath();
     ctx.moveTo(0, 0);
     for (let i = 0; i <= STEPS; i++) {
       const t = i / STEPS;
       const y = t * h;
-      const x = baseInset + Math.sin(t * Math.PI * 2.0) * ampPx;
+      const x = baseInset + wave(t) * ampPx;
       ctx.lineTo(x, y);
     }
     ctx.lineTo(0, h);
     ctx.closePath();
     ctx.fill();
-    // Right wall fill.
+    // Right wall fill — same offset (parallel shift, not mirror).
     ctx.beginPath();
     ctx.moveTo(w, 0);
     for (let i = 0; i <= STEPS; i++) {
       const t = i / STEPS;
       const y = t * h;
-      const x = w - baseInset - Math.sin(t * Math.PI * 2.0 + Math.PI) * ampPx;
+      const x = w - baseInset + wave(t) * ampPx;
       ctx.lineTo(x, y);
     }
     ctx.lineTo(w, h);
@@ -137,7 +188,7 @@ function drawWalls(
     for (let i = 0; i <= STEPS; i++) {
       const t = i / STEPS;
       const y = t * h;
-      const xl = baseInset + Math.sin(t * Math.PI * 2.0) * ampPx;
+      const xl = baseInset + wave(t) * ampPx;
       if (i === 0) ctx.moveTo(xl, y); else ctx.lineTo(xl, y);
     }
     ctx.stroke();
@@ -145,7 +196,7 @@ function drawWalls(
     for (let i = 0; i <= STEPS; i++) {
       const t = i / STEPS;
       const y = t * h;
-      const xr = w - baseInset - Math.sin(t * Math.PI * 2.0 + Math.PI) * ampPx;
+      const xr = w - baseInset + wave(t) * ampPx;
       if (i === 0) ctx.moveTo(xr, y); else ctx.lineTo(xr, y);
     }
     ctx.stroke();
@@ -236,12 +287,11 @@ function drawClusterSamples(
   }
 }
 
-// Draw an individual cluster sample at (cx, cy). Normal clusters get
-// rendered as a tiny polyhex of N hexes (matching their in-game shape);
-// pickup kinds (coin / shield / drone) are always single. Power-up
-// blobs (sticky / slow / fast) render as one larger blob whose radius
-// scales with √N so a "size 5 sticky" reads bigger than "size 1 sticky"
-// without trying to draw 5 individual blobs.
+// Draw an individual cluster sample at (cx, cy). All non-pickup kinds
+// build a polyhex of N cells and render one cell-sized hex / blob at
+// each — same as the in-game drawAsHex / drawAsBlob logic. Pickup
+// kinds (coin / shield / drone) are always single-cell since they
+// spawn that way in-game.
 function drawClusterSample(
   ctx: CanvasRenderingContext2D,
   cx: number,
@@ -251,21 +301,16 @@ function drawClusterSample(
   size: number,
   rng: () => number,
 ): void {
-  if (kind === "normal" && size > 1) {
-    const shape = buildPolyhexShape(size, rng);
-    for (const part of shape) {
-      const off = axialToPixel(part, hexSize);
-      drawSample(ctx, cx + off.x, cy + off.y, hexSize, kind);
-    }
+  const isPickup = kind === "coin" || kind === "shield" || kind === "drone";
+  if (isPickup || size <= 1) {
+    drawSample(ctx, cx, cy, hexSize, kind);
     return;
   }
-  if (kind === "sticky" || kind === "slow" || kind === "fast") {
-    // Approximate a multi-hex blob with a single bigger blob.
-    const r = hexSize * Math.sqrt(Math.max(1, size));
-    drawSample(ctx, cx, cy, r, kind);
-    return;
+  const shape = buildPolyhexShape(size, rng);
+  for (const part of shape) {
+    const off = axialToPixel(part, hexSize);
+    drawSample(ctx, cx + off.x, cy + off.y, hexSize, kind);
   }
-  drawSample(ctx, cx, cy, hexSize, kind);
 }
 
 function drawSample(

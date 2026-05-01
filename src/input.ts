@@ -436,11 +436,22 @@ export function bindRotatePad(
 // Bind a horizontal slider: while a finger (or mouse) is on the pad, the
 // callback fires with a value in [-1, 1] mapped to the touch x position.
 // On release, the callback fires with null.
+export interface SliderHandle {
+  /** Tear down the listeners and the resize observer. */
+  unbind: () => void;
+  /** Re-position the knob. Pass a value (-1..1) to set it
+   *  explicitly, or omit to re-render the current value. Call after
+   *  toggling the touchbar's display from none → flex so the knob
+   *  finds its real x once the pad has a measured width, or to
+   *  reset the knob to centre at the start of a fresh run. */
+  refresh: (value?: number) => void;
+}
+
 export function bindSlider(
   pad: HTMLElement,
-  knob: HTMLElement,
+  _knob: HTMLElement,
   onSlide: SlideHandler,
-): () => void {
+): SliderHandle {
   let active = false;
   const KNOB_HALF = 24;
   const PAD_INSET = 8;
@@ -472,11 +483,13 @@ export function bindSlider(
   };
 
   const positionKnob = (value: number): void => {
-    const rect = pad.getBoundingClientRect();
-    const usable = rect.width - 2 * (PAD_INSET + KNOB_HALF);
+    // CSS resolves the knob's `left` from `--knob-ratio` against the
+    // pad's actual width. We set just the ratio here so the position
+    // is always correct, even when the pad is currently display:none
+    // (the variable stays cached and CSS applies it the moment the
+    // pad gets laid out). No measurement, no race conditions.
     const ratio = (value + 1) / 2;
-    const x = PAD_INSET + KNOB_HALF + ratio * usable - KNOB_HALF;
-    knob.style.left = `${x}px`;
+    pad.style.setProperty("--knob-ratio", String(ratio));
     currentValue = value;
   };
 
@@ -545,13 +558,29 @@ export function bindSlider(
   // Defer initial knob positioning until the pad has a measured width.
   requestAnimationFrame(() => positionKnob(0));
 
-  return () => {
-    pad.removeEventListener("touchstart", onTouchStart);
-    pad.removeEventListener("touchmove", onTouchMove);
-    pad.removeEventListener("touchend", onTouchEnd);
-    pad.removeEventListener("touchcancel", onTouchEnd);
-    pad.removeEventListener("mousedown", onMouseDown);
-    document.removeEventListener("mousemove", onMouseMove);
-    document.removeEventListener("mouseup", onMouseUp);
+  // The pad starts with display:none on the menu (CSS hides the
+  // touchbar outside of "in-play"). When the game later flips to
+  // in-play and the touchbar becomes visible, the pad's width jumps
+  // from 0 to its real value — without observing this, the knob
+  // stays at the (degenerate) position computed against zero width
+  // and reads as stuck on the left edge. ResizeObserver fires on
+  // every dimension change, so re-position the knob each time using
+  // the current value.
+  const ro = new ResizeObserver(() => positionKnob(currentValue));
+  ro.observe(pad);
+
+  return {
+    unbind: () => {
+      pad.removeEventListener("touchstart", onTouchStart);
+      pad.removeEventListener("touchmove", onTouchMove);
+      pad.removeEventListener("touchend", onTouchEnd);
+      pad.removeEventListener("touchcancel", onTouchEnd);
+      pad.removeEventListener("mousedown", onMouseDown);
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+      ro.disconnect();
+    },
+    refresh: (value?: number) =>
+      positionKnob(typeof value === "number" ? value : currentValue),
   };
 }
