@@ -101,6 +101,10 @@ import { loadBool, loadJson, loadString, removeKey, saveBool, saveJson, saveStri
 import { STORAGE_KEYS } from "./storageKeys";
 import { computeWaveParams, lateGameSpeedMul } from "./spawn";
 import { highestTierCrossed, stepMilestones } from "./scoring";
+import { escapeHtml } from "./ui/escape";
+import { difficultyTint, drawBlockIcon } from "./ui/components/blockIcon";
+import { BlocksGuide } from "./ui/screens/blocksGuide";
+import { UnlockShop } from "./ui/screens/unlockShop";
 
 // Build-time feature flag: while the IAP unlock flow is being verified
 // on TestFlight, set VITE_EDITOR_UNLOCKED=1 in .env.local (or any vite
@@ -2452,54 +2456,8 @@ export class Game {
   }
 
   private renderBlocksGuide(): void {
-    const entries: Array<{ kind: ClusterKind; name: string; desc: string }> = [
-      { kind: "normal",  name: "AVOID",   desc: "Sticks one cell onto your blob on contact and starts your danger combo." },
-      { kind: "coin",    name: "COLLECT", desc: "Pick up for +5 score." },
-      { kind: "sticky",  name: "HEAL",    desc: "An N-cell heal rips N-1 hexes off your blob, shrinking you back down." },
-      { kind: "slow",    name: "SLOW",    desc: "Slows the game to 0.5× — easier dodging." },
-      { kind: "fast",    name: "FAST",    desc: "Speeds the game up. Passes bank a 3X bonus pool — survive the timer to cash it in, blue hits forfeit it. Each restack: more speed and +1X." },
-      { kind: "shield",  name: "SHIELD",  desc: "Wraps you in a bubble that absorbs blue hits at 1 second per hit. Sticky still rips." },
-      { kind: "drone",   name: "DRONE",   desc: "Spawns a mid-screen sentinel that shatters blue clusters on contact." },
-      { kind: "tiny",    name: "TINY",    desc: "Shrinks you to half size — much smaller hitbox. Re-hit while tiny banks +2 and refreshes the timer." },
-      { kind: "big",     name: "BIG",     desc: "Grows you and banks a 3X bonus pool like FAST. Survive the timer to cash in, blue hits forfeit. Each restack: more size and +1X." },
-    ];
-
-    const cards = entries
-      .map(
-        (e) => `
-          <div class="blocks-card">
-            <canvas class="blocks-icon" data-block-icon="${e.kind}" width="72" height="72"></canvas>
-            <div class="blocks-text">
-              <div class="blocks-name">${e.name}</div>
-              <div class="blocks-desc">${escapeHtml(e.desc)}</div>
-            </div>
-          </div>
-        `,
-      )
-      .join("");
-
-    this.overlay.innerHTML = `
-      <div class="blocks-guide">
-        <div class="challenge-select-top">
-          <button type="button" class="challenge-back" data-action="close-blocks">← Back</button>
-          <span style="font-size:13px; letter-spacing:0.18em; text-transform:uppercase; color:#aab4dc;">Blocks</span>
-          <span style="width:60px"></span>
-        </div>
-        <div class="blocks-list">
-          ${cards}
-        </div>
-      </div>
-    `;
-
-    // Paint each icon canvas using the same blob/hex visuals as the
-    // in-game cluster renderer, so the guide stays in sync if the
-    // palette ever changes.
-    const canvases = this.overlay.querySelectorAll<HTMLCanvasElement>("canvas[data-block-icon]");
-    canvases.forEach((c) => {
-      const kind = c.dataset.blockIcon as ClusterKind | undefined;
-      if (!kind) return;
-      drawBlockIcon(c, kind);
-    });
+    this.overlay.innerHTML = BlocksGuide.render();
+    BlocksGuide.bind?.(this.overlay);
   }
 
   // ----- Challenge Editor ----------------------------------------------
@@ -4655,37 +4613,10 @@ export class Game {
   }
 
   private renderUnlockShop(): void {
-    const price = this.unlockProduct?.displayPrice;
-    const priceLine = price ? `<span class="unlock-shop-price">${escapeHtml(price)}</span>` : "";
-    const buyHtml = `
-        <button type="button" class="play-btn unlock-shop-buy" data-action="iap-unlock">
-          <span>BUY</span>
-          ${priceLine}
-        </button>
-        <button type="button" class="challenge-back" data-action="iap-restore">Restore previous purchase</button>
-      `;
-    this.overlay.innerHTML = `
-      <div class="unlock-shop">
-        <div class="challenge-select-top">
-          <button type="button" class="challenge-back" data-action="unlock-shop-back">← Back</button>
-          <span style="font-size:13px; letter-spacing:0.18em; text-transform:uppercase; color:#aab4dc;">Unlock everything</span>
-          <span style="width:60px"></span>
-        </div>
-        <h1 class="unlock-shop-title">UNLOCK EVERYTHING</h1>
-        <ul class="unlock-shop-list">
-          <li><span class="unlock-shop-bullet">★</span><span>Open every challenge in all 6 blocks immediately</span></li>
-          <li><span class="unlock-shop-bullet">★</span><span>Unlock <strong>PAINFUL</strong> difficulty</span></li>
-          <li><span class="unlock-shop-bullet">★</span><span>Build and play your own challenges in the <strong>Challenge Editor</strong></span></li>
-          <li><span class="unlock-shop-bullet">★</span><span>One-time purchase, restores across devices</span></li>
-        </ul>
-        <div class="unlock-shop-actions">
-          ${buyHtml}
-        </div>
-        <p class="unlock-shop-organic">
-          Or earn it the long way: complete 3 of 5 challenges in a block to unlock the next, and score ${HARDCORE_UNLOCK_SCORE} on Hard to unlock Painful mode.
-        </p>
-      </div>
-    `;
+    this.overlay.innerHTML = UnlockShop.render({
+      priceLabel: this.unlockProduct?.displayPrice ?? null,
+      hardcoreUnlockScore: HARDCORE_UNLOCK_SCORE,
+    });
   }
 
   private openChallengeSelect(): void {
@@ -9426,14 +9357,7 @@ function cssAttrEscape(s: string): string {
   return s.replace(/["\\]/g, (ch) => `\\${ch.charCodeAt(0).toString(16)} `);
 }
 
-function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
+// escapeHtml moved to src/ui/escape.ts in Phase 2.
 
 // Render a single block icon into the given canvas, mirroring the in-game
 // look so the BLOCKS guide stays visually consistent with the actual
@@ -9542,91 +9466,9 @@ function paintCellOnCanvas(
   ctx.stroke();
 }
 
-function drawBlockIcon(canvas: HTMLCanvasElement, kind: ClusterKind): void {
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return;
-  const w = canvas.width;
-  const h = canvas.height;
-  const cx = w / 2;
-  const cy = h / 2;
-  const hexSize = Math.min(w, h) * 0.32;
-  ctx.clearRect(0, 0, w, h);
+// drawBlockIcon moved to src/ui/components/blockIcon.ts in Phase 2.
 
-  if (kind === "coin") {
-    const r = hexSize * 0.95;
-    const glowR = hexSize * 1.6;
-    ctx.save();
-    ctx.globalCompositeOperation = "lighter";
-    const halo = ctx.createRadialGradient(cx, cy, 0, cx, cy, glowR);
-    halo.addColorStop(0, "rgba(255, 170, 70, 0.85)");
-    halo.addColorStop(0.5, "rgba(220, 130, 30, 0.45)");
-    halo.addColorStop(1, "rgba(0,0,0,0)");
-    ctx.fillStyle = halo;
-    ctx.beginPath();
-    ctx.arc(cx, cy, glowR, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.restore();
-    const grad = ctx.createRadialGradient(cx - r * 0.3, cy - r * 0.3, 0, cx, cy, r);
-    grad.addColorStop(0, "#fff1c2");
-    grad.addColorStop(0.45, "#ffb255");
-    grad.addColorStop(1, "#a14e08");
-    ctx.fillStyle = grad;
-    ctx.beginPath();
-    ctx.arc(cx, cy, r, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = "rgba(255, 240, 200, 0.95)";
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
-    return;
-  }
-
-  if (kind === "normal") {
-    pathHex(ctx, cx, cy, hexSize);
-    const grad = ctx.createLinearGradient(0, cy - hexSize, 0, cy + hexSize);
-    grad.addColorStop(0, "#aac4ff");
-    grad.addColorStop(1, "#5b8bff");
-    ctx.fillStyle = grad;
-    ctx.fill();
-    ctx.lineWidth = 1.5;
-    ctx.strokeStyle = "#1c2348";
-    ctx.stroke();
-    return;
-  }
-
-  // Helpful kinds: same drawAsBlob recipe as cluster.ts.
-  const palette = blobPalette(kind);
-  const r = hexSize * 0.85;
-  const glowR = hexSize * 1.7;
-  ctx.save();
-  ctx.globalCompositeOperation = "lighter";
-  const halo = ctx.createRadialGradient(cx, cy, 0, cx, cy, glowR);
-  halo.addColorStop(0, palette.haloInner);
-  halo.addColorStop(0.5, palette.haloMid);
-  halo.addColorStop(1, "rgba(0,0,0,0)");
-  ctx.fillStyle = halo;
-  ctx.beginPath();
-  ctx.arc(cx, cy, glowR, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.restore();
-  const core = ctx.createRadialGradient(cx - r * 0.3, cy - r * 0.3, 0, cx, cy, r);
-  core.addColorStop(0, palette.coreLight);
-  core.addColorStop(1, palette.coreDark);
-  ctx.fillStyle = core;
-  ctx.beginPath();
-  ctx.arc(cx, cy, r, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.strokeStyle = "rgba(255, 255, 255, 0.6)";
-  ctx.lineWidth = 1.5;
-  ctx.stroke();
-}
-
-// Difficulty banding for the challenge-select hexes: 1-2 = green
-// (chill), 3-4 = yellow (heat), 5 = red (top of the ladder).
-function difficultyTint(d: number): string {
-  if (d >= 5) return "#e64545";
-  if (d >= 3) return "#ffd76b";
-  return "#7fe89c";
-}
+// difficultyTint moved to src/ui/components/blockIcon.ts in Phase 2.
 
 function generateStars(
   w: number,
