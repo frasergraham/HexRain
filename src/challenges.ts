@@ -6,7 +6,7 @@
 // stored under a single localStorage key.
 
 import type { ClusterKind } from "./types";
-import { parseWaveLine, validateChallenge, type ChallengeDefLike } from "./waveDsl";
+import { parseWaveLine, type ChallengeDefLike } from "./waveDsl";
 import { syncProgressUp } from "./cloudSync";
 import { loadJson, saveJson } from "./storage";
 import { STORAGE_KEYS } from "./storageKeys";
@@ -800,31 +800,6 @@ function recomputeUnlocked(completed: Set<string>, purchasedUnlock = false): num
   return out;
 }
 
-// === Validation guard (dev only) ==========================================
-
-if (import.meta.env?.DEV) {
-  const ids = new Set<string>();
-  const blockCounts = new Map<number, number>();
-  const errors: string[] = [];
-  for (const c of CHALLENGES) {
-    if (ids.has(c.id)) errors.push(`Duplicate challenge id ${c.id}`);
-    ids.add(c.id);
-    blockCounts.set(c.block, (blockCounts.get(c.block) ?? 0) + 1);
-    for (const e of validateChallenge(c)) errors.push(`[${c.id}] ${e}`);
-    // Sanity-parse every wave (validateChallenge already did this, but
-    // double-check so a bad wave throws here with a clear stack trace).
-    for (let i = 0; i < c.waves.length; i++) {
-      try { parseWaveLine(c.waves[i]); }
-      catch (e) {
-        errors.push(`[${c.id}] wave ${i + 1}: ${(e as Error).message}`);
-      }
-    }
-  }
-  for (const [b, n] of blockCounts) {
-    if (n !== 5) errors.push(`Block ${b} has ${n} challenges (expected 5)`);
-  }
-  if (errors.length) {
-    // eslint-disable-next-line no-console
-    console.error("[challenges] validation errors:\n" + errors.join("\n"));
-  }
-}
+// Roster validation lives in tests/challenges-defs.test.ts (Phase 4.1).
+// CI fails the build if any check trips, instead of just printing to
+// console.error in the dev environment.

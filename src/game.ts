@@ -100,12 +100,14 @@ import { hashSeed, mulberry32, type Random } from "./rng";
 import { loadBool, loadJson, loadString, removeKey, saveBool, saveJson, saveString } from "./storage";
 import { STORAGE_KEYS } from "./storageKeys";
 
-// TEMP: until the IAP unlock flow is verified end-to-end on TestFlight,
-// the Challenge Editor is auto-unlocked on iOS so we can keep iterating
-// without needing a sandbox-purchase round-trip. Revert this constant
-// to `false` (or delete the const + restore the original `purchasedUnlock
-// || debugEnabled` checks) before shipping the editor publicly.
-const EDITOR_TEMP_UNLOCKED_ON_IOS = true;
+// Build-time feature flag: while the IAP unlock flow is being verified
+// on TestFlight, set VITE_EDITOR_UNLOCKED=1 in .env.local (or any vite
+// env file) to auto-open the Challenge Editor on iOS without going
+// through a sandbox-purchase round-trip. Default is true today (matches
+// pre-flag behaviour); flip to "0" for the final ship build. Set to
+// "0" or omit to gate the editor behind purchasedUnlock as designed.
+const EDITOR_TEMP_UNLOCKED_ON_IOS =
+  (import.meta.env?.VITE_EDITOR_UNLOCKED ?? "1") !== "0";
 
 // Score-club achievements are difficulty-gated: easy earns none, medium
 // earns the standard ladder, and hard earns the Elite ladder. The
