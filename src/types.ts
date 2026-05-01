@@ -24,7 +24,8 @@ export type GameState =
   | "unlockShop"
   | "blocksGuide"
   | "editorHome"
-  | "editorEdit";
+  | "editorEdit"
+  | "communitySingle";
 
 export type GameMode = "endless" | "challenge";
 

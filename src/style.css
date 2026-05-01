@@ -1866,6 +1866,15 @@ body.editor-previewing #app {
   align-items: stretch;
   min-width: 84px;
 }
+/* Pair container used by the Installed Challenges section so 🏆 +
+ * SHARE share a single row beneath PLAY / REMIX (each of which still
+ * gets its own full-width row). */
+.editor-home-row-actions-pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  width: 100%;
+}
 .editor-home-row-actions .editor-row-btn {
   width: 100%;
   text-align: center;
@@ -3523,13 +3532,62 @@ body:not(.in-play) #touchbar {
   width: 100%;
 }
 .community-card-icon-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
+  display: flex;
   gap: 6px;
   width: 100%;
 }
-.community-card-icon-row.community-card-icon-row-solo {
-  grid-template-columns: 1fr;
+.community-card-icon-btn {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+/* Single shared-challenge view (deep link entry point). */
+.single-challenge {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 12px;
+  align-items: center;
+}
+.single-challenge-card {
+  width: 100%;
+  max-width: 360px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 18px 16px;
+  background: rgba(31, 36, 64, 0.55);
+  border: 1px solid rgba(170, 100, 220, 0.32);
+  border-radius: 12px;
+}
+.single-challenge-name {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 800;
+  color: #ffffff;
+  letter-spacing: 0.02em;
+}
+.single-challenge-author {
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: #aab4dc;
+}
+.single-challenge-hex-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.single-challenge-stats {
+  font-size: 13px;
+}
+.single-challenge-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
 }
 .community-card-icon-btn {
   font-family: inherit;
@@ -3578,6 +3636,16 @@ body:not(.in-play) #touchbar {
   background: rgba(255, 92, 110, 0.18);
   border: 1px solid rgba(255, 150, 170, 0.45);
   color: #ffd4dc;
+}
+.editor-row-btn-share {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 10px;
+  color: #c9a4ff;
+}
+.editor-row-btn-share svg {
+  display: block;
 }
 
 /* Modal sheets (leaderboard, report). */

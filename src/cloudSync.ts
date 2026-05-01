@@ -318,6 +318,16 @@ export async function queryCommunity(opts: CommunityQueryOpts): Promise<Communit
   };
 }
 
+// Fetch a single PublishedChallenge by record name. Returns null if
+// the challenge doesn't exist, has been hidden, or the network fails.
+// Used by the deep-link single-challenge view.
+export async function fetchCommunityChallenge(recordName: string): Promise<PublishedChallenge | null> {
+  if (!isCommunityReadable()) return null;
+  const rec = await fetchRecord("public", recordName);
+  if (!rec) return null;
+  return recordToPublished(rec);
+}
+
 // Install a published challenge into the local custom-challenge store.
 // Re-installing the same record (by recordName) updates the existing
 // install in place rather than creating a duplicate.

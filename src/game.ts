@@ -76,6 +76,7 @@ import {
   type ProductInfo,
 } from "./storeKit";
 import {
+  fetchCommunityChallenge,
   hasUpvoted as cloudHasUpvoted,
   installCommunity,
   isCloudReady,
@@ -94,6 +95,7 @@ import {
   type ReportReason,
 } from "./cloudSync";
 import { isCloudKitAvailable } from "./cloudKit";
+import { shareChallenge } from "./share";
 import { hashSeed, mulberry32, type Random } from "./rng";
 
 // TEMP: until the IAP unlock flow is verified end-to-end on TestFlight,
@@ -1218,6 +1220,22 @@ export class Game {
         if (rn) this.openReportDialog(rn);
         return;
       }
+      const communityShareBtn = target?.closest('button[data-action="community-share"]') as HTMLButtonElement | null;
+      if (communityShareBtn) {
+        playSfx("click");
+        const rn = communityShareBtn.dataset.recordName;
+        const name = communityShareBtn.dataset.shareName ?? "this challenge";
+        if (rn) void shareChallenge(name, rn);
+        return;
+      }
+      // Back from the single-challenge (deep-link) view: route to the
+      // origin we recorded when the view was opened.
+      const singleBackBtn = target?.closest('button[data-action="single-back"]') as HTMLButtonElement | null;
+      if (singleBackBtn) {
+        playSfx("click");
+        this.closeSingleChallenge();
+        return;
+      }
       // Leaderboard / report sheet close (backdrop tap or × button).
       const closeLbBtn = target?.closest('[data-action="close-leaderboard"]') as HTMLElement | null;
       if (closeLbBtn) {
@@ -2216,6 +2234,16 @@ export class Game {
   // Per-modal state for the leaderboard + report sheets.
   private leaderboardSheet: { recordName: string; rows: CommunityScore[]; loading: boolean } | null = null;
   private reportSheet: { recordName: string; reason: ReportReason; note: string } | null = null;
+
+  // Deep-link single-challenge view: when set, renderSingleChallenge
+  // shows just this one card with full actions. `origin` records
+  // where to send the player when they tap BACK.
+  private singleChallenge: {
+    recordName: string;
+    challenge: PublishedChallenge | null;
+    error: string | null;
+    origin: "menu" | "challengeSelect";
+  } | null = null;
 
   // Spawn-side RNG. Defaults to Math.random for endless mode; swapped
   // to a seeded mulberry32 keyed on the challenge id at startChallenge,
@@ -5001,9 +5029,10 @@ export class Game {
       const reportBtn = showAuthedActions
         ? `<button type="button" class="community-card-icon-btn" data-action="community-report" data-record-name="${escapeHtml(p.recordName)}" aria-label="Report">⚑</button>`
         : "";
-      const iconRowClass = showAuthedActions
-        ? "community-card-icon-row"
-        : "community-card-icon-row community-card-icon-row-solo";
+      // (Share moved to the Installed Challenges section — sharing
+      // an entry the player has installed reads as "I tried this,
+      // here, try it too" while sharing a random browse-list card
+      // would be more like a recommendation. Cleaner social loop.)
       const waveCount = p.waves.length;
       const waveLabel = `${waveCount} ${waveCount === 1 ? "wave" : "waves"}`;
       return `
@@ -5026,7 +5055,7 @@ export class Game {
               ${playOrInstall}
               <button type="button" class="community-card-btn community-card-btn-remix" data-action="community-remix" data-record-name="${escapeHtml(p.recordName)}">REMIX</button>
             </div>
-            <div class="${iconRowClass}">
+            <div class="community-card-icon-row">
               ${likeBtn}
               <button type="button" class="community-card-icon-btn" data-action="community-leaderboard" data-record-name="${escapeHtml(p.recordName)}" aria-label="Leaderboard">🏆</button>
               ${reportBtn}
@@ -5075,6 +5104,9 @@ export class Game {
       const leaderboardBtn = isCommunityReadable() && recordName
         ? `<button type="button" class="editor-row-btn editor-row-btn-edit" data-action="community-leaderboard" data-record-name="${escapeHtml(recordName)}" aria-label="Leaderboard">🏆</button>`
         : "";
+      const shareBtn = recordName
+        ? `<button type="button" class="editor-row-btn editor-row-btn-share" data-action="community-share" data-record-name="${escapeHtml(recordName)}" data-share-name="${escapeHtml(c.name)}" aria-label="Share">${IOS_SHARE_GLYPH_SVG}</button>`
+        : "";
       return `
         <div class="editor-home-row-swipe" data-swipe-id="${escapeHtml(c.id)}">
           <button type="button" class="editor-home-row-delete" data-action="installed-uninstall" data-custom-id="${escapeHtml(c.id)}" tabindex="-1" aria-label="Uninstall">UNINSTALL</button>
@@ -5090,13 +5122,135 @@ export class Game {
             <div class="editor-home-row-actions">
               <button type="button" class="editor-row-btn editor-row-btn-play" data-action="installed-play" data-custom-id="${escapeHtml(c.id)}">PLAY</button>
               <button type="button" class="editor-row-btn editor-row-btn-edit" data-action="editor-remix-custom" data-custom-id="${escapeHtml(c.id)}">REMIX</button>
-              ${leaderboardBtn}
+              <div class="editor-home-row-actions-pair">
+                ${leaderboardBtn}
+                ${shareBtn}
+              </div>
             </div>
           </div>
         </div>
       `;
     }).join("");
     return `<div class="editor-home-rows">${rows}</div>`;
+  }
+
+  // Open the single-challenge view for a deep-link record name. Used
+  // by main.ts when the launch URL has ?challenge=X, and by future
+  // in-app entry points if we ever want a "show one" surface from a
+  // share notification. `origin` controls where BACK lands.
+  async openSingleChallenge(recordName: string, origin: "menu" | "challengeSelect" = "menu"): Promise<void> {
+    this.singleChallenge = { recordName, challenge: null, error: null, origin };
+    this.state = "communitySingle";
+    this.setScoreVisible(false);
+    this.setPauseButtonVisible(false);
+    this.setHudVisible(false);
+    this.setInPlay(false);
+    this.renderSingleChallenge();
+    this.overlay.classList.remove("hidden");
+    if (!isCommunityReadable()) {
+      this.singleChallenge.error = "Community challenges aren't reachable from this build.";
+      this.renderSingleChallenge();
+      return;
+    }
+    const fetched = await fetchCommunityChallenge(recordName);
+    if (!this.singleChallenge || this.singleChallenge.recordName !== recordName) return;
+    if (!fetched) {
+      this.singleChallenge.error = "This challenge couldn't be loaded — it may have been removed.";
+    } else {
+      this.singleChallenge.challenge = fetched;
+      // Hydrate the upvote cache for this single record so the heart
+      // shows filled if the player has already liked it.
+      void this.hydrateUpvoteCache([fetched]);
+    }
+    this.renderSingleChallenge();
+  }
+
+  private closeSingleChallenge(): void {
+    const origin = this.singleChallenge?.origin ?? "menu";
+    this.singleChallenge = null;
+    if (origin === "challengeSelect") {
+      this.openChallengeSelect();
+    } else {
+      this.state = "menu";
+      this.renderMenu();
+    }
+  }
+
+  private renderSingleChallenge(): void {
+    const sheet = this.singleChallenge;
+    if (!sheet) return;
+    let body: string;
+    if (sheet.error) {
+      body = `<div class="challenge-community-status">${escapeHtml(sheet.error)}</div>`;
+    } else if (!sheet.challenge) {
+      body = `<div class="challenge-community-status">Loading shared challenge…</div>`;
+    } else {
+      const p = sheet.challenge;
+      const tint = difficultyTint(p.difficulty);
+      const hexes: string[] = [];
+      for (let i = 0; i < p.difficulty; i++) {
+        hexes.push(`<span class="challenge-card-hex" style="background:${tint};"></span>`);
+      }
+      const installed = !!listCustomChallenges().find((c) => c.installedFrom === p.recordName);
+      const upvoted = this.upvoteCache.has(p.recordName);
+      const showAuthedActions = isCloudKitAvailable();
+      const playOrInstall = installed
+        ? `<button type="button" class="community-card-btn community-card-btn-play" data-action="community-play" data-record-name="${escapeHtml(p.recordName)}">PLAY</button>`
+        : `<button type="button" class="community-card-btn community-card-btn-install" data-action="community-install" data-record-name="${escapeHtml(p.recordName)}">INSTALL</button>`;
+      const likeBtn = showAuthedActions
+        ? `<button type="button" class="community-card-icon-btn${upvoted ? " filled-like" : ""}" data-action="community-upvote" data-record-name="${escapeHtml(p.recordName)}" aria-label="Like">${upvoted ? "♥" : "♡"}</button>`
+        : "";
+      const reportBtn = showAuthedActions
+        ? `<button type="button" class="community-card-icon-btn" data-action="community-report" data-record-name="${escapeHtml(p.recordName)}" aria-label="Report">⚑</button>`
+        : "";
+      const shareBtn = `<button type="button" class="community-card-icon-btn" data-action="community-share" data-record-name="${escapeHtml(p.recordName)}" data-share-name="${escapeHtml(p.name)}" aria-label="Share">${IOS_SHARE_GLYPH_SVG}</button>`;
+      const installedBadge = installed
+        ? `<span class="challenge-card-installed">INSTALLED</span>`
+        : "";
+      const waveCount = p.waves.length;
+      const waveLabel = `${waveCount} ${waveCount === 1 ? "wave" : "waves"}`;
+      body = `
+        <div class="single-challenge-card">
+          <span class="challenge-card-id">SHARED CHALLENGE</span>
+          <h1 class="single-challenge-name">${escapeHtml(p.name)}</h1>
+          <span class="single-challenge-author">by ${escapeHtml(p.authorName)}</span>
+          <div class="single-challenge-hex-row">
+            <div class="challenge-card-hexes">${hexes.join("")}</div>
+            <span class="challenge-card-waves">${waveLabel}</span>
+          </div>
+          <div class="challenge-card-stats single-challenge-stats">
+            <span title="Installs">⬇ ${p.installCount}</span>
+            <span title="Plays">▶ ${p.playCount}</span>
+            <span title="Likes">♥ ${p.upvoteCount}</span>
+          </div>
+          ${installedBadge}
+          <div class="single-challenge-actions">
+            <div class="community-card-top-row">
+              ${playOrInstall}
+              <button type="button" class="community-card-btn community-card-btn-remix" data-action="community-remix" data-record-name="${escapeHtml(p.recordName)}">REMIX</button>
+            </div>
+            <div class="community-card-icon-row">
+              ${likeBtn}
+              <button type="button" class="community-card-icon-btn" data-action="community-leaderboard" data-record-name="${escapeHtml(p.recordName)}" aria-label="Leaderboard">🏆</button>
+              ${reportBtn}
+              ${shareBtn}
+            </div>
+          </div>
+        </div>
+      `;
+    }
+    this.overlay.innerHTML = `
+      <div class="single-challenge">
+        <div class="challenge-select-top">
+          <button type="button" class="challenge-back" data-action="single-back">← Back</button>
+          <span style="font-size:13px; letter-spacing:0.18em; text-transform:uppercase; color:#aab4dc;">Shared</span>
+          <span style="width:60px"></span>
+        </div>
+        ${body}
+      </div>
+      ${this.renderLeaderboardSheetHtml()}
+      ${this.renderReportSheetHtml()}
+    `;
   }
 
   private async refreshCommunity(): Promise<void> {
@@ -5133,8 +5287,20 @@ export class Game {
     }
   }
 
+  // Locate a PublishedChallenge across both the cached community list
+  // and the single-challenge deep-link view, so action handlers work
+  // identically from either entry point.
+  private findPublishedChallenge(recordName: string): PublishedChallenge | null {
+    const fromList = this.communityChallenges.find((c) => c.recordName === recordName);
+    if (fromList) return fromList;
+    if (this.singleChallenge?.challenge?.recordName === recordName) {
+      return this.singleChallenge.challenge;
+    }
+    return null;
+  }
+
   private async handleCommunityInstall(recordName: string): Promise<void> {
-    const p = this.communityChallenges.find((c) => c.recordName === recordName);
+    const p = this.findPublishedChallenge(recordName);
     if (!p) return;
     const installed = await installCommunity(p);
     if (!installed) {
@@ -5142,6 +5308,7 @@ export class Game {
       return;
     }
     if (this.state === "challengeSelect") this.renderChallengeSelect();
+    if (this.state === "communitySingle") this.renderSingleChallenge();
   }
 
   private handleCommunityPlay(recordName: string): void {
@@ -5156,7 +5323,7 @@ export class Game {
   // remixing a roster challenge in the editor home. Drops the player
   // into the editor on the new copy so they can start tweaking.
   private handleCommunityRemix(recordName: string): void {
-    const p = this.communityChallenges.find((c) => c.recordName === recordName);
+    const p = this.findPublishedChallenge(recordName);
     if (!p) return;
     const cloned = remixCustomChallenge({
       name: `${p.name} (by ${p.authorName})`,
@@ -5168,33 +5335,43 @@ export class Game {
   }
 
   private async handleCommunityUpvote(recordName: string): Promise<void> {
-    const idx = this.communityChallenges.findIndex((c) => c.recordName === recordName);
-    if (idx < 0) return;
+    const target = this.findPublishedChallenge(recordName);
+    if (!target) return;
     const wasUpvoted = this.upvoteCache.has(recordName);
+    const apply = (delta: number) => {
+      target.upvoteCount = Math.max(0, target.upvoteCount + delta);
+    };
     // Optimistic UI: update local count + cache before the round-trip
     // resolves, then revert if the call fails.
     if (wasUpvoted) {
       this.upvoteCache.delete(recordName);
-      this.communityChallenges[idx]!.upvoteCount = Math.max(0, this.communityChallenges[idx]!.upvoteCount - 1);
+      apply(-1);
     } else {
       this.upvoteCache.add(recordName);
-      this.communityChallenges[idx]!.upvoteCount += 1;
+      apply(1);
     }
-    if (this.state === "challengeSelect") this.renderChallengeSelect();
+    this.rerenderForCommunityState();
     const ok = wasUpvoted
       ? await cloudRemoveUpvote(recordName)
       : await cloudUpvote(recordName);
     if (!ok) {
-      // Revert on failure.
       if (wasUpvoted) {
         this.upvoteCache.add(recordName);
-        this.communityChallenges[idx]!.upvoteCount += 1;
+        apply(1);
       } else {
         this.upvoteCache.delete(recordName);
-        this.communityChallenges[idx]!.upvoteCount = Math.max(0, this.communityChallenges[idx]!.upvoteCount - 1);
+        apply(-1);
       }
-      if (this.state === "challengeSelect") this.renderChallengeSelect();
+      this.rerenderForCommunityState();
     }
+  }
+
+  // Re-render whichever surface is currently showing a community card.
+  // Both renderChallengeSelect and renderSingleChallenge rebuild from
+  // cached state, so this just wakes up the right one.
+  private rerenderForCommunityState(): void {
+    if (this.state === "challengeSelect") this.renderChallengeSelect();
+    else if (this.state === "communitySingle") this.renderSingleChallenge();
   }
 
   private async openLeaderboardSheet(recordName: string): Promise<void> {
@@ -9185,6 +9362,10 @@ function composeWaveLine(w: ParsedWave): string {
 
 // Hard cap on rows in the Custom Wave editor. Each row maps to one slot
 // token in the DSL output (skipped rows emit "000").
+// iOS-style share glyph (square with up arrow). Inline SVG so it
+// renders identically across platforms and respects currentColor.
+const IOS_SHARE_GLYPH_SVG = `<svg viewBox="0 0 16 22" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" width="14" height="14"><path d="M8 0L3.5 4.5l1.06 1.06L7.25 2.87V14h1.5V2.87l2.69 2.69L12.5 4.5 8 0z" fill="currentColor"/><path d="M2 8H1a1 1 0 00-1 1v12a1 1 0 001 1h14a1 1 0 001-1V9a1 1 0 00-1-1h-1v1.5h1V20.5H1.5V9.5h1V8z" fill="currentColor"/></svg>`;
+
 const CUSTOM_WAVE_LEN = 30;
 
 const CUSTOM_WAVE_KINDS: ClusterKind[] = [
