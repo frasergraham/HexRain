@@ -36,7 +36,7 @@ import {
 } from "./audio";
 import { Player } from "./player";
 import type { Axial, ClusterKind, Difficulty, GameMode, GameState, InputAction, Shape, WallKind } from "./types";
-import { ANGLE_TABLE, parseWaveLine, type ParsedWave } from "./waveDsl";
+import { ANGLE_TABLE, composeWaveLine, isCustomShapedWave, parseWaveLine, type ParsedWave } from "./waveDsl";
 import {
   CHALLENGES,
   awardStars,
@@ -97,13 +97,37 @@ import {
 import { isCloudKitAvailable } from "./cloudKit";
 import { shareChallenge } from "./share";
 import { hashSeed, mulberry32, type Random } from "./rng";
+import { loadBool, loadJson, loadString, removeKey, saveBool, saveJson, saveString } from "./storage";
+import { STORAGE_KEYS } from "./storageKeys";
+import { computeWaveParams, lateGameSpeedMul } from "./spawn";
+import { highestTierCrossed, stepMilestones } from "./scoring";
+import { escapeHtml } from "./ui/escape";
+import { drawBlockIcon } from "./ui/components/blockIcon";
+import { BlocksGuide } from "./ui/screens/blocksGuide";
+import { UnlockShop } from "./ui/screens/unlockShop";
+import { ChallengeIntro } from "./ui/screens/challengeIntro";
+import { ChallengeComplete } from "./ui/screens/challengeComplete";
+import { GameOver } from "./ui/screens/gameOver";
+import { LeaderboardSheet } from "./ui/screens/leaderboardSheet";
+import { ReportSheet } from "./ui/screens/reportSheet";
+import { SingleChallenge } from "./ui/screens/singleChallenge";
+import { renderCommunityBody as renderCommunityBodyView } from "./ui/screens/communityBody";
+import { renderInstalledChallengesBody as renderInstalledChallengesBodyView } from "./ui/screens/installedChallengesBody";
+import { renderChallengeSelect as renderChallengeSelectView } from "./ui/screens/challengeSelect";
+import { renderEditorHome as renderEditorHomeView } from "./ui/screens/editorHome";
+import { renderSettingsDialog as renderSettingsDialogView } from "./ui/screens/settingsDialog";
+import { renderWaveDialog as renderWaveDialogView } from "./ui/screens/waveDialog";
+import { renderCustomWaveDialog as renderCustomWaveDialogView } from "./ui/screens/customWaveDialog";
+import { renderEditorEdit as renderEditorEditView } from "./ui/screens/editorEdit";
 
-// TEMP: until the IAP unlock flow is verified end-to-end on TestFlight,
-// the Challenge Editor is auto-unlocked on iOS so we can keep iterating
-// without needing a sandbox-purchase round-trip. Revert this constant
-// to `false` (or delete the const + restore the original `purchasedUnlock
-// || debugEnabled` checks) before shipping the editor publicly.
-const EDITOR_TEMP_UNLOCKED_ON_IOS = true;
+// Build-time feature flag: while the IAP unlock flow is being verified
+// on TestFlight, set VITE_EDITOR_UNLOCKED=1 in .env.local (or any vite
+// env file) to auto-open the Challenge Editor on iOS without going
+// through a sandbox-purchase round-trip. Default is true today (matches
+// pre-flag behaviour); flip to "0" for the final ship build. Set to
+// "0" or omit to gate the editor behind purchasedUnlock as designed.
+const EDITOR_TEMP_UNLOCKED_ON_IOS =
+  (import.meta.env?.VITE_EDITOR_UNLOCKED ?? "1") !== "0";
 
 // Score-club achievements are difficulty-gated: easy earns none, medium
 // earns the standard ladder, and hard earns the Elite ladder. The
@@ -259,38 +283,28 @@ const DIFFICULTY_CONFIG: Record<Difficulty, DifficultyConfig> = {
   },
 };
 
-const DIFFICULTY_STORAGE_KEY = "hexrain.difficulty";
+const DIFFICULTY_STORAGE_KEY = STORAGE_KEYS.difficulty;
 const DIFFICULTY_DEFAULT: Difficulty = "medium";
-const HIGH_SCORE_KEY_PREFIX = "hexrain.highScore.";
+const HIGH_SCORE_KEY_PREFIX = STORAGE_KEYS.highScorePrefix;
 
 // Hardcore difficulty: locked by default. Unlocks organically when the
 // player scores HARDCORE_UNLOCK_SCORE on hard, or via the unlock-all IAP.
-const HARDCORE_UNLOCK_KEY = "hexrain.hardcoreUnlocked";
+const HARDCORE_UNLOCK_KEY = STORAGE_KEYS.hardcoreUnlocked;
 const HARDCORE_UNLOCK_SCORE = 1000;
-const LEGACY_HIGH_SCORE_KEY = "hexrain.highScore";
+const LEGACY_HIGH_SCORE_KEY = STORAGE_KEYS.legacyHighScore;
 // Per-kind first-appearance hint labels (AVOID/HEAL/etc.) and the
 // rotate tutorial fire once per player, not once per session.
-const SEEN_HINTS_STORAGE_KEY = "hexrain.seenHints";
-const ROTATE_TUTORIAL_STORAGE_KEY = "hexrain.rotateTutorialShown";
-const CONTROLS_HINT_STORAGE_KEY = "hexrain.controlsHintShown";
+const SEEN_HINTS_STORAGE_KEY = STORAGE_KEYS.seenHints;
+const ROTATE_TUTORIAL_STORAGE_KEY = STORAGE_KEYS.rotateTutorialShown;
+const CONTROLS_HINT_STORAGE_KEY = STORAGE_KEYS.controlsHintShown;
 
 function loadSeenHints(): Set<ClusterKind> {
-  try {
-    const raw = localStorage.getItem(SEEN_HINTS_STORAGE_KEY);
-    if (!raw) return new Set();
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? new Set(parsed as ClusterKind[]) : new Set();
-  } catch {
-    return new Set();
-  }
+  const parsed = loadJson<unknown>(SEEN_HINTS_STORAGE_KEY, null);
+  return Array.isArray(parsed) ? new Set(parsed as ClusterKind[]) : new Set();
 }
 
 function saveSeenHints(set: Set<ClusterKind>): void {
-  try {
-    localStorage.setItem(SEEN_HINTS_STORAGE_KEY, JSON.stringify([...set]));
-  } catch {
-    /* quota / private mode */
-  }
+  saveJson(SEEN_HINTS_STORAGE_KEY, [...set]);
 }
 
 // Persisted UI state: whether each collapsible section on the
@@ -299,26 +313,18 @@ function saveSeenHints(set: Set<ClusterKind>): void {
 // collapsed = false so new players see content on first visit.
 type CollapsibleKey = "official" | "myChallenges" | "installedChallenges" | "community";
 const COLLAPSED_KEYS: Record<CollapsibleKey, string> = {
-  official: "hexrain.challengeSelect.officialCollapsed.v1",
-  myChallenges: "hexrain.challengeSelect.myChallengesCollapsed.v1",
-  installedChallenges: "hexrain.challengeSelect.installedChallengesCollapsed.v1",
-  community: "hexrain.challengeSelect.communityCollapsed.v1",
+  official: STORAGE_KEYS.challengeSelectOfficialCollapsed,
+  myChallenges: STORAGE_KEYS.challengeSelectMyChallengesCollapsed,
+  installedChallenges: STORAGE_KEYS.challengeSelectInstalledChallengesCollapsed,
+  community: STORAGE_KEYS.challengeSelectCommunityCollapsed,
 };
 
 function loadCollapsed(key: CollapsibleKey): boolean {
-  try {
-    return localStorage.getItem(COLLAPSED_KEYS[key]) === "1";
-  } catch {
-    return false;
-  }
+  return loadBool(COLLAPSED_KEYS[key], false);
 }
 
 function saveCollapsed(key: CollapsibleKey, collapsed: boolean): void {
-  try {
-    localStorage.setItem(COLLAPSED_KEYS[key], collapsed ? "1" : "0");
-  } catch {
-    /* quota / private mode */
-  }
+  saveBool(COLLAPSED_KEYS[key], collapsed);
 }
 
 const BASE_FALL_SPEED = 1.6; // initial downward velocity for spawned clusters (px/ms)
@@ -334,9 +340,8 @@ const MAX_FALL_SPEED = 5.5;
 const CHALLENGE_BASE_FALL_SPEED = 12;
 const CHALLENGE_MAX_FALL_SPEED = 60;
 
-const SPAWN_INTERVAL_START = 1.6; // seconds
-const SPAWN_INTERVAL_MIN = 0.7;
-const SPAWN_INTERVAL_RAMP = 0.03;
+// SPAWN_INTERVAL_START / _MIN / _RAMP moved to src/spawn.ts in
+// Phase 1.5 — wave-cadence math is pure and lives there now.
 
 const LOSE_COMBO = 2;
 const STICK_INVULN_MS = 180;
@@ -489,8 +494,7 @@ const NEBULA_SCROLL_SPEED = 4; // px/sec downward drift of the nebula
 
 const HINT_TIMESCALE = 0.5; // game runs at this rate while a hint cluster is on screen
 const ROTATE_TUTORIAL_TIMESCALE = 0.25; // even slower while teaching the rotate gesture
-const LATE_RAMP_FLOOR_SCORE = 500; // late-game speed-up kicks in at this score
-const LATE_RAMP_PER_100 = 0.1; // base rate gains this much per 100 points past the floor
+// LATE_RAMP_FLOOR_SCORE / LATE_RAMP_PER_100 moved to src/spawn.ts.
 const ROTATE_SLIDE_SENS = 0.02; // radians of player rotation per pixel of horizontal drag
 
 export class Game {
@@ -768,13 +772,13 @@ export class Game {
   // player grows from 1 → 2 hexes. Slows the game to 0.25x and shows a
   // big "ROTATE" label + curved double-headed arrow around the player
   // until they rotate enough or the timer expires.
-  private rotateTutorialShown = localStorage.getItem(ROTATE_TUTORIAL_STORAGE_KEY) === "1";
+  private rotateTutorialShown = loadBool(ROTATE_TUTORIAL_STORAGE_KEY, false);
   private rotateTutorialActive = false;
   private rotateTutorialTimer = 0;
   private rotateTutorialStartAngle = 0;
   // Desktop one-shot controls hint shown on the menu the first time
   // the player ever launches. Cleared by Reset hints.
-  private controlsHintShown = localStorage.getItem(CONTROLS_HINT_STORAGE_KEY) === "1";
+  private controlsHintShown = loadBool(CONTROLS_HINT_STORAGE_KEY, false);
 
   // Fast power-up combo state. fastLevel counts how many fast pickups
   // happened this run (1 → 3x, 2 → 4x, 3 → 5x, …); each pickup also
@@ -856,13 +860,13 @@ export class Game {
 
     // Migrate the original single-best key into the medium per-difficulty
     // slot the first time we see it, then forget the legacy key.
-    const legacy = localStorage.getItem(LEGACY_HIGH_SCORE_KEY);
-    if (legacy != null) {
+    const legacy = loadString(LEGACY_HIGH_SCORE_KEY, "");
+    if (legacy !== "") {
       const mediumKey = HIGH_SCORE_KEY_PREFIX + "medium";
-      const existing = Number(localStorage.getItem(mediumKey) ?? 0) || 0;
+      const existing = Number(loadString(mediumKey, "0")) || 0;
       const legacyN = Number(legacy) || 0;
-      if (legacyN > existing) localStorage.setItem(mediumKey, String(legacyN));
-      localStorage.removeItem(LEGACY_HIGH_SCORE_KEY);
+      if (legacyN > existing) saveString(mediumKey, String(legacyN));
+      removeKey(LEGACY_HIGH_SCORE_KEY);
     }
 
     this.difficulty = this.loadDifficulty();
@@ -1519,7 +1523,7 @@ export class Game {
         const idx = parseInt(editorOpenWaveBtn.dataset.waveIdx ?? "-1", 10);
         if (Number.isFinite(idx) && idx >= 0 && this.editingCustom) {
           const line = this.editingCustom.waves[idx] ?? "";
-          if (this.isCustomShapedWave(line)) this.openExistingCustomWaveDialog(idx);
+          if (isCustomShapedWave(line)) this.openExistingCustomWaveDialog(idx);
           else this.openExistingWaveDialog(idx);
         }
         return;
@@ -2290,7 +2294,7 @@ export class Game {
     // Mark as shown immediately so future runs don't replay it; also
     // schedules the fade-out so the player has time to read.
     this.controlsHintShown = true;
-    try { localStorage.setItem(CONTROLS_HINT_STORAGE_KEY, "1"); } catch { /* ignore */ }
+    saveBool(CONTROLS_HINT_STORAGE_KEY, true);
     setTimeout(() => hint.classList.add("fading"), 4500);
     setTimeout(() => { hint.hidden = true; hint.classList.remove("fading"); }, 5500);
   }
@@ -2466,54 +2470,8 @@ export class Game {
   }
 
   private renderBlocksGuide(): void {
-    const entries: Array<{ kind: ClusterKind; name: string; desc: string }> = [
-      { kind: "normal",  name: "AVOID",   desc: "Sticks one cell onto your blob on contact and starts your danger combo." },
-      { kind: "coin",    name: "COLLECT", desc: "Pick up for +5 score." },
-      { kind: "sticky",  name: "HEAL",    desc: "An N-cell heal rips N-1 hexes off your blob, shrinking you back down." },
-      { kind: "slow",    name: "SLOW",    desc: "Slows the game to 0.5× — easier dodging." },
-      { kind: "fast",    name: "FAST",    desc: "Speeds the game up. Passes bank a 3X bonus pool — survive the timer to cash it in, blue hits forfeit it. Each restack: more speed and +1X." },
-      { kind: "shield",  name: "SHIELD",  desc: "Wraps you in a bubble that absorbs blue hits at 1 second per hit. Sticky still rips." },
-      { kind: "drone",   name: "DRONE",   desc: "Spawns a mid-screen sentinel that shatters blue clusters on contact." },
-      { kind: "tiny",    name: "TINY",    desc: "Shrinks you to half size — much smaller hitbox. Re-hit while tiny banks +2 and refreshes the timer." },
-      { kind: "big",     name: "BIG",     desc: "Grows you and banks a 3X bonus pool like FAST. Survive the timer to cash in, blue hits forfeit. Each restack: more size and +1X." },
-    ];
-
-    const cards = entries
-      .map(
-        (e) => `
-          <div class="blocks-card">
-            <canvas class="blocks-icon" data-block-icon="${e.kind}" width="72" height="72"></canvas>
-            <div class="blocks-text">
-              <div class="blocks-name">${e.name}</div>
-              <div class="blocks-desc">${escapeHtml(e.desc)}</div>
-            </div>
-          </div>
-        `,
-      )
-      .join("");
-
-    this.overlay.innerHTML = `
-      <div class="blocks-guide">
-        <div class="challenge-select-top">
-          <button type="button" class="challenge-back" data-action="close-blocks">← Back</button>
-          <span style="font-size:13px; letter-spacing:0.18em; text-transform:uppercase; color:#aab4dc;">Blocks</span>
-          <span style="width:60px"></span>
-        </div>
-        <div class="blocks-list">
-          ${cards}
-        </div>
-      </div>
-    `;
-
-    // Paint each icon canvas using the same blob/hex visuals as the
-    // in-game cluster renderer, so the guide stays in sync if the
-    // palette ever changes.
-    const canvases = this.overlay.querySelectorAll<HTMLCanvasElement>("canvas[data-block-icon]");
-    canvases.forEach((c) => {
-      const kind = c.dataset.blockIcon as ClusterKind | undefined;
-      if (!kind) return;
-      drawBlockIcon(c, kind);
-    });
+    this.overlay.innerHTML = BlocksGuide.render();
+    BlocksGuide.bind?.(this.overlay);
   }
 
   // ----- Challenge Editor ----------------------------------------------
@@ -2561,174 +2519,17 @@ export class Game {
   }
 
   private renderEditorHome(): void {
-    // Installed community challenges live in their own Community →
-    // INSTALLED bucket — they aren't shown here because My Challenges
-    // is for content the player authored. The editor's Remix Existing
-    // section below still surfaces them as fork sources.
     const allCustoms = listCustomChallenges();
-    const list = allCustoms.filter((c) => !c.installedFrom);
-    const rows = list.length === 0
-      ? `<p class="editor-home-empty">No custom challenges yet. Tap + to create your first.</p>`
-      : list
-          .map((c) => {
-            const created = new Date(c.createdAt);
-            const dateStr = `${created.getFullYear()}-${String(created.getMonth() + 1).padStart(2, "0")}-${String(created.getDate()).padStart(2, "0")}`;
-            const tint = difficultyTint(c.difficulty);
-            const hexes: string[] = [];
-            for (let i = 0; i < c.difficulty; i++) {
-              hexes.push(`<span class="challenge-card-hex" style="background:${tint};"></span>`);
-            }
-            const stars = [0, 1, 2]
-              .map((i) =>
-                `<span class="challenge-card-star${i < c.starsEarned ? " earned" : ""}">★</span>`,
-              )
-              .join("");
-            const attempted = c.best > 0 || c.bestPct > 0 || c.starsEarned > 0;
-            const starsHtml = attempted
-              ? `<div class="challenge-card-stars">${stars}</div>`
-              : "";
-            const bestScoreText = c.best > 0 ? `Best: ${c.best}` : "Best: —";
-            const pctText = c.bestPct > 0
-              ? `<span class="challenge-card-pct${c.bestPct >= 100 ? " full" : ""}">${c.bestPct}%</span>`
-              : `<span class="challenge-card-pct">—</span>`;
-            // PUBLISH stays clickable on every platform so web users
-            // get a clear "iOS only" message instead of a mysteriously
-            // dead button. Debug mode keeps its legacy clipboard path;
-            // iOS uses the real CloudKit publish flow; web falls into
-            // the alert branch in publishCustomChallenge.
-            const publishCls = "editor-row-btn editor-row-btn-publish";
-            const publishAttr = "";
-            const isPublished = !!c.publishedRecordName;
-            const publishLabel = isPublished ? "UPDATE" : "PUBLISH";
-            const unpublishHtml = isPublished
-              ? `<button type="button" class="editor-row-btn editor-row-btn-unpublish" data-action="editor-unpublish" data-custom-id="${escapeHtml(c.id)}">UNPUBLISH</button>`
-              : "";
-            const publishedBadge = isPublished
-              ? `<span class="editor-home-row-published">PUBLISHED v${c.publishedVersion ?? 1}</span>`
-              : "";
-            const remixLine = c.remixedFrom
-              ? `<span class="editor-home-row-remix">Remixed from: ${escapeHtml(c.remixedFrom)}</span>`
-              : "";
-            const installedLine = c.installedFrom
-              ? `<span class="editor-home-row-installed">Installed from ${escapeHtml(c.installedAuthorName ?? "the community")}${c.installedVersion ? ` · v${c.installedVersion}` : ""}</span>`
-              : "";
-            // Each row sits inside a swipeable container that reveals
-            // a DELETE action on left-swipe. The actual <button> for
-            // delete lives at the right edge, full-height; the row on
-            // top translates to expose it. Tapping it confirms then
-            // deletes via deleteCustomChallenge.
-            return `
-              <div class="editor-home-row-swipe" data-swipe-id="${escapeHtml(c.id)}">
-                <button type="button" class="editor-home-row-delete" data-action="editor-delete" data-custom-id="${escapeHtml(c.id)}" tabindex="-1" aria-label="Delete challenge">DELETE</button>
-                <div class="editor-home-row" data-custom-id="${escapeHtml(c.id)}">
-                  <div class="editor-home-row-meta">
-                    <span class="challenge-card-id">CUSTOM</span>
-                    <span class="challenge-card-name">${escapeHtml(c.name)}</span>
-                    ${publishedBadge}
-                    ${remixLine}
-                    ${installedLine}
-                    <div class="challenge-card-hexes">${hexes.join("")}</div>
-                    ${starsHtml}
-                    <span class="challenge-card-best">${bestScoreText} ${pctText}</span>
-                    <span class="editor-home-row-date">Created ${dateStr}</span>
-                  </div>
-                  <div class="editor-home-row-actions">
-                    <button type="button" class="editor-row-btn editor-row-btn-play" data-action="editor-play" data-custom-id="${escapeHtml(c.id)}">PLAY</button>
-                    <button type="button" class="editor-row-btn editor-row-btn-edit" data-action="editor-edit" data-custom-id="${escapeHtml(c.id)}">EDIT</button>
-                    <button type="button" class="${publishCls}" data-action="editor-publish" data-custom-id="${escapeHtml(c.id)}" ${publishAttr}>${publishLabel}</button>
-                    ${unpublishHtml}
-                  </div>
-                </div>
-              </div>
-            `;
-          })
-          .join("");
-
-    // Remix-existing section: every roster challenge in an unlocked block
-    // gets a row with a single REMIX button that clones it into My
-    // Challenges. Locked blocks are excluded — players shouldn't be able
-    // to remix content they haven't unlocked. After the roster, we
-    // append every installed community challenge as a remix source so
-    // the player can fork someone else's published level into their
-    // own editable copy.
+    const authoredCustoms = allCustoms.filter((c) => !c.installedFrom);
     const progress = loadChallengeProgress();
     const unlockedSet = new Set(progress.unlockedBlocks);
     const remixRoster = CHALLENGES.filter((def) => unlockedSet.has(def.block));
     const remixCommunity = allCustoms.filter((c) => !!c.installedFrom);
-    const remixCount = remixRoster.length + remixCommunity.length;
-    const rosterRows = remixRoster.map((def) => {
-      const tint = difficultyTint(def.difficulty);
-      const hexes: string[] = [];
-      for (let i = 0; i < def.difficulty; i++) {
-        hexes.push(`<span class="challenge-card-hex" style="background:${tint};"></span>`);
-      }
-      return `
-        <div class="editor-home-row editor-home-row-remix-source">
-          <div class="editor-home-row-meta">
-            <span class="challenge-card-id">${escapeHtml(def.id)}</span>
-            <span class="challenge-card-name">${escapeHtml(def.name)}</span>
-            <div class="challenge-card-hexes">${hexes.join("")}</div>
-          </div>
-          <div class="editor-home-row-actions">
-            <button type="button" class="editor-row-btn editor-row-btn-edit" data-action="editor-remix" data-roster-id="${escapeHtml(def.id)}">REMIX</button>
-          </div>
-        </div>
-      `;
-    }).join("");
-    const communityRows = remixCommunity.map((c) => {
-      const tint = difficultyTint(c.difficulty);
-      const hexes: string[] = [];
-      for (let i = 0; i < c.difficulty; i++) {
-        hexes.push(`<span class="challenge-card-hex" style="background:${tint};"></span>`);
-      }
-      const author = c.installedAuthorName ?? "the community";
-      return `
-        <div class="editor-home-row editor-home-row-remix-source editor-home-row-remix-community">
-          <div class="editor-home-row-meta">
-            <span class="challenge-card-id">COMMUNITY</span>
-            <span class="challenge-card-name">${escapeHtml(c.name)}</span>
-            <span class="editor-home-row-installed">by ${escapeHtml(author)}</span>
-            <div class="challenge-card-hexes">${hexes.join("")}</div>
-          </div>
-          <div class="editor-home-row-actions">
-            <button type="button" class="editor-row-btn editor-row-btn-edit" data-action="editor-remix-custom" data-custom-id="${escapeHtml(c.id)}">REMIX</button>
-          </div>
-        </div>
-      `;
-    }).join("");
-    const remixRows = rosterRows + communityRows;
-    const remixSection = remixCount > 0
-      ? `
-        <section class="challenge-block">
-          <header class="challenge-block-header">
-            <span>Remix Existing</span>
-            <span class="progress">${remixCount}</span>
-          </header>
-          <div class="editor-home-rows">${remixRows}</div>
-        </section>
-      `
-      : "";
-
-    this.overlay.innerHTML = `
-      <div class="editor-home">
-        <div class="challenge-select-top">
-          <button type="button" class="challenge-back" data-action="editor-home-back">← Back</button>
-          <span style="font-size:13px; letter-spacing:0.18em; text-transform:uppercase; color:#aab4dc;">Challenge Editor</span>
-          <span style="width:60px"></span>
-        </div>
-        <section class="challenge-block">
-          <header class="challenge-block-header">
-            <span>My Challenges</span>
-            <span class="progress">${list.length}</span>
-          </header>
-          <div class="editor-home-rows">
-            ${rows}
-            <button type="button" class="editor-home-add" data-action="editor-new" aria-label="Create new custom challenge">+</button>
-          </div>
-        </section>
-        ${remixSection}
-      </div>
-    `;
+    this.overlay.innerHTML = renderEditorHomeView({
+      authoredCustoms,
+      remixRoster,
+      remixCommunity,
+    });
   }
 
   private openEditorEdit(custom: CustomChallenge): void {
@@ -2750,59 +2551,33 @@ export class Game {
     const c = this.editingCustom;
     if (!c) return;
 
-    const wavesAtMax = c.waves.length >= MAX_WAVES_PER_CUSTOM;
-    const rows = c.waves.map((line, idx) => {
-      const check = checkWaveLine(line);
-      let parsed: ParsedWave | null = null;
-      try { parsed = parseWaveLine(line); } catch { parsed = null; }
-      const selectedCls = idx === this.editorSelectedWaveIdx ? " selected" : "";
-      const warnCls = check.ok ? "" : " invalid";
-      const warnBadge = check.ok
-        ? ""
-        : `<span class="editor-wave-warn" title="${escapeHtml(check.reason!)}" aria-label="Wave invalid">!</span>`;
-
-      let infoHtml: string;
-      if (parsed) {
-        const isCustom = this.isCustomShapedWave(line);
-        const blocksPer10s = Math.round(10 / parsed.spawnInterval);
-        const countLabel = parsed.countCap !== null && parsed.countCap > 0
-          ? `<span class="editor-wave-info-item"><span class="editor-wave-info-label">×</span>${parsed.countCap}</span>`
-          : "";
-        const customBadge = isCustom
-          ? `<span class="editor-wave-info-item editor-wave-info-custom">CUSTOM</span>`
-          : "";
-        infoHtml = `
-          <div class="editor-wave-info">
-            ${customBadge}
-            <span class="editor-wave-info-item"><span class="editor-wave-info-label">Speed</span>${parsed.baseSpeedMul.toFixed(2)}</span>
-            <span class="editor-wave-info-item"><span class="editor-wave-info-label">Rate</span>${blocksPer10s}/10s</span>
-            ${countLabel}
-          </div>
-        `;
-      } else {
-        infoHtml = `<div class="editor-wave-info editor-wave-info-error">${escapeHtml(check.ok ? "" : check.reason!)}</div>`;
-      }
-
-      return `
-        <div class="editor-wave-row${selectedCls}${warnCls}" data-wave-idx="${idx}">
-          <button type="button" class="editor-drag-handle" data-action="editor-drag" data-wave-idx="${idx}" aria-label="Drag to reorder">⋮⋮</button>
-          <div class="editor-wave-canvas-wrap">
-            ${infoHtml}
-            <canvas class="editor-wave-thumb" data-wave-thumb="${idx}"></canvas>
-            ${warnBadge}
-          </div>
-          <button type="button" class="editor-row-btn editor-row-btn-edit" data-action="editor-open-wave" data-wave-idx="${idx}">EDIT</button>
-          <button type="button" class="editor-row-btn editor-row-btn-delete" data-action="editor-delete-wave" data-wave-idx="${idx}" aria-label="Delete wave">×</button>
-        </div>
-      `;
-    }).join("");
-
     const dialogHtml = this.editorDialog === "wave"
-      ? this.renderWaveDialogHtml()
+      ? renderWaveDialogView({
+          workingLine: this.editorDialogWaveLine,
+          isNewWave: this.editorDialogIsNewWave,
+          waveIdx: this.editorDialogWaveIdx,
+          presetId: this.editorDialogPresetId,
+          presetsOpen: this.editorDialogPresetsOpen,
+          advancedOpen: this.editorDialogAdvancedOpen,
+          pctValues: this.editorDialogPctValues,
+        })
       : this.editorDialog === "customWave"
-        ? this.renderCustomWaveDialogHtml()
+        ? renderCustomWaveDialogView({
+            isNewWave: this.editorDialogIsNewWave,
+            waveIdx: this.editorDialogWaveIdx,
+            paletteKinds: CUSTOM_WAVE_KINDS,
+            selectedKind: this.editorCustomWaveKind,
+            rate: this.editorCustomWaveRate,
+            speed: this.editorCustomWaveSpeed,
+            walls: this.editorCustomWaveWalls,
+            optionsOpen: this.editorCustomWaveOptionsOpen,
+            slots: this.editorCustomWaveSlots,
+            visibleRows: this.editorCustomWaveVisibleRows,
+            maxRows: CUSTOM_WAVE_LEN,
+            picker: this.editorCustomCellPicker,
+          })
         : this.editorDialog === "settings"
-          ? this.renderSettingsDialogHtml(c)
+          ? renderSettingsDialogView({ challenge: c })
           : "";
 
     // Snapshot scroll positions of in-place re-rendered dialogs so the
@@ -2811,36 +2586,13 @@ export class Game {
     const waveDialogScroll = this.overlay.querySelector<HTMLElement>(".editor-dialog-wave")?.scrollTop ?? 0;
     const customPaletteScroll = this.overlay.querySelector<HTMLElement>(".editor-custom-palette-row")?.scrollLeft ?? 0;
 
-    this.overlay.innerHTML = `
-      <div class="editor-edit">
-        <div class="challenge-select-top">
-          <button type="button" class="challenge-back" data-action="editor-edit-back">← Save</button>
-          <span style="font-size:13px; letter-spacing:0.18em; text-transform:uppercase; color:#aab4dc;">Edit Challenge</span>
-          <span style="width:60px"></span>
-        </div>
-        <button type="button" class="play-btn editor-edit-play-big" data-action="editor-edit-play">PLAY</button>
-        <div class="editor-edit-meta">
-          <div class="editor-quick-row">
-            <span class="editor-quick-label">Name${helpTipHtml("name")}</span>
-            <div class="editor-quick-controls">
-              <input class="editor-meta-input" data-editor-field="name" type="text" maxlength="${MAX_CUSTOM_NAME_LEN}" value="${escapeHtml(c.name)}" />
-            </div>
-          </div>
-          <button type="button" class="editor-options-btn" data-action="editor-open-settings">
-            <span class="editor-options-icon" aria-hidden="true">⚙</span>
-            <span>Options</span>
-          </button>
-        </div>
-        <div class="editor-wave-list">
-          ${rows}
-          <div class="editor-add-wave-row">
-            <button type="button" class="editor-add-wave" data-action="editor-add-wave" ${wavesAtMax ? "disabled" : ""}>${wavesAtMax ? "Maximum 100 waves" : "+ Add Regular Wave"}</button>
-            <button type="button" class="editor-add-wave editor-add-wave-custom" data-action="editor-add-custom-wave" ${wavesAtMax ? "disabled" : ""}>${wavesAtMax ? "" : "+ Add Custom Wave"}</button>
-          </div>
-        </div>
-        ${dialogHtml}
-      </div>
-    `;
+    this.overlay.innerHTML = renderEditorEditView({
+      challenge: c,
+      maxWaves: MAX_WAVES_PER_CUSTOM,
+      maxNameLen: MAX_CUSTOM_NAME_LEN,
+      selectedWaveIdx: this.editorSelectedWaveIdx,
+      dialogHtml,
+    });
 
     // Paint thumbnails after the DOM is in place.
     this.overlay.querySelectorAll<HTMLCanvasElement>("canvas[data-wave-thumb]").forEach((cv) => {
@@ -3118,268 +2870,7 @@ export class Game {
     this.startWavePreview();
   }
 
-  // Compose a wave-dialog HTML using the current transient state. Reads
-  // editorDialog* fields for preset selection, advanced-open, and the
-  // composed line. The advanced form's input values come from parsing
-  // the line so they always reflect the latest preset/build output.
-  private renderWaveDialogHtml(): string {
-    const line = this.editorDialogWaveLine || "size=2-3, rate=0.7, speed=1.2, count=10";
-    let parsed: ParsedWave | null = null;
-    let parseErr = "";
-    try {
-      parsed = parseWaveLine(line);
-    } catch (e) {
-      parseErr = (e as Error).message;
-      try { parsed = parseWaveLine("size=2-3, rate=0.7, speed=1.2, count=10"); } catch { /* impossible */ }
-    }
-    if (!parsed) return "";
-    const w = parsed;
-    const hasSlots = w.slots.length > 0;
 
-    // Preset chips. Each preset's full recipe (size / speed / rate /
-    // walls / mix) is loaded into the working line on click — Advanced
-    // shows everything; the always-visible bar exposes the three knobs
-    // a player almost always wants to tweak.
-    const presetChips = WAVE_PRESETS.map((p) => `
-      <button type="button" class="editor-preset-chip${this.editorDialogPresetId === p.id ? " selected" : ""}"
-        data-action="editor-preset-pick" data-preset-id="${escapeHtml(p.id)}"
-        title="${escapeHtml(p.blurb)}">
-        ${escapeHtml(p.name)}
-      </button>
-    `).join("");
-
-    // Always-visible Count / Duration / Rate / Walls steppers — the
-    // four knobs that come up most often. Other tunables (size, speed,
-    // slot rate, wall amp/period, etc.) live in Advanced.
-    const countLabel = w.countCap === null ? "—" : String(w.countCap);
-    const durLabel = w.durOverride === null ? "—" : `${w.durOverride.toFixed(1)}s`;
-    // Rate is stored as seconds-between-spawns but displayed as
-    // blocks-per-10s (higher = denser) since players think in flow not
-    // gap. The DSL gets the seconds value back at save time.
-    const rateBlocks = Math.round(10 / w.spawnInterval);
-    const rateLabel = `${rateBlocks}/10s`;
-    const wallsName = WALL_LABEL[w.walls] ?? "No walls";
-    const quickHtml = `
-      <section class="editor-quick">
-        <div class="editor-quick-row">
-          <span class="editor-quick-label">Count${helpTipHtml("count")}</span>
-          <div class="editor-quick-controls">
-            <button type="button" class="editor-mix-step editor-mix-minus"
-              data-action="editor-bump-count" data-delta="-1"
-              ${w.countCap === null ? "disabled" : ""}>−</button>
-            <span class="editor-mix-value">${countLabel}</span>
-            <button type="button" class="editor-mix-step editor-mix-plus"
-              data-action="editor-bump-count" data-delta="1"
-              ${(w.countCap ?? 0) >= 200 ? "disabled" : ""}>+</button>
-          </div>
-        </div>
-        <div class="editor-quick-row">
-          <span class="editor-quick-label">Duration${helpTipHtml("dur")}</span>
-          <div class="editor-quick-controls">
-            <button type="button" class="editor-mix-step editor-mix-minus"
-              data-action="editor-bump-dur" data-delta="-0.5"
-              ${w.durOverride === null ? "disabled" : ""}>−</button>
-            <span class="editor-mix-value">${durLabel}</span>
-            <button type="button" class="editor-mix-step editor-mix-plus"
-              data-action="editor-bump-dur" data-delta="0.5"
-              ${(w.durOverride ?? 0) >= 120 ? "disabled" : ""}>+</button>
-          </div>
-        </div>
-        <div class="editor-quick-row">
-          <span class="editor-quick-label">Rate${helpTipHtml("rate")}</span>
-          <div class="editor-quick-controls">
-            <button type="button" class="editor-mix-step editor-mix-minus"
-              data-action="editor-bump-rate" data-delta="-5"
-              ${w.spawnInterval >= 1.95 ? "disabled" : ""}>−</button>
-            <span class="editor-mix-value">${rateLabel}</span>
-            <button type="button" class="editor-mix-step editor-mix-plus"
-              data-action="editor-bump-rate" data-delta="5"
-              ${w.spawnInterval <= 0.0501 ? "disabled" : ""}>+</button>
-          </div>
-        </div>
-        <div class="editor-quick-row">
-          <span class="editor-quick-label">Walls${helpTipHtml("walls")}</span>
-          <div class="editor-quick-walls-controls">
-            <button type="button" class="editor-walls-arrow"
-              data-action="editor-cycle-walls" data-dir="-1" aria-label="Previous wall">‹</button>
-            <span class="editor-walls-name">${escapeHtml(wallsName)}</span>
-            <button type="button" class="editor-walls-arrow"
-              data-action="editor-cycle-walls" data-dir="1" aria-label="Next wall">›</button>
-          </div>
-        </div>
-      </section>
-    `;
-
-    const mixHtml = this.renderClusterMixHtml();
-
-    // Advanced fields (always rendered, hidden via CSS when collapsed).
-    const advancedHtml = this.renderWaveAdvancedHtml(w);
-
-    const titleText = this.editorDialogIsNewWave
-      ? "New wave"
-      : `Wave ${(this.editorDialogWaveIdx ?? 0) + 1}`;
-    const errBanner = parseErr
-      ? `<div class="editor-dialog-err">Parse error: ${escapeHtml(parseErr)}</div>`
-      : "";
-    const slotsBanner = hasSlots
-      ? `<div class="editor-dialog-note">Custom slot pattern (${w.slots.length} slots) — locked, coming in phase 2.</div>`
-      : "";
-    const advCls = this.editorDialogAdvancedOpen ? "editor-advanced open" : "editor-advanced";
-    const advChevron = this.editorDialogAdvancedOpen ? "−" : "+";
-
-    return `
-      <div class="editor-dialog-backdrop" data-action="editor-dialog-cancel"></div>
-      <div class="editor-dialog editor-dialog-wave" role="dialog" aria-label="${titleText}">
-        <div class="editor-dialog-top">
-          <button type="button" class="challenge-back" data-action="editor-dialog-ok">← Save</button>
-          <h2>${escapeHtml(titleText)}</h2>
-          <span style="width:60px"></span>
-        </div>
-        ${errBanner}
-        ${slotsBanner}
-        <button type="button" class="editor-section-toggle" data-action="editor-toggle-presets">
-          <span class="editor-advanced-chevron">${this.editorDialogPresetsOpen ? "−" : "+"}</span> Preset Waves
-        </button>
-        <section class="editor-presets${this.editorDialogPresetsOpen ? " open" : ""}">
-          <div class="editor-preset-chips">${presetChips}</div>
-        </section>
-        ${quickHtml}
-        ${mixHtml}
-        <button type="button" class="editor-advanced-toggle" data-action="editor-toggle-advanced">
-          <span class="editor-advanced-chevron">${advChevron}</span> Advanced
-        </button>
-        <div class="${advCls}">
-          ${advancedHtml}
-        </div>
-        <div class="editor-dialog-actions">
-          <button type="button" class="challenge-back" data-action="editor-dialog-cancel">Cancel</button>
-          <button type="button" class="play-btn" data-action="editor-dialog-ok">${this.editorDialogIsNewWave ? "ADD" : "OK"}</button>
-        </div>
-      </div>
-    `;
-  }
-
-  // Advanced wave-form fields. Count / Duration / Rate / Walls live in
-  // the always-visible bar, so they're omitted here. Each row uses the
-  // same row layout as the basic-view quick controls so the two
-  // sections feel consistent.
-  private renderWaveAdvancedHtml(w: ParsedWave): string {
-    const isZigzag = w.walls === "zigzag";
-    const fmtInt = (v: number) => String(Math.round(v));
-    const fmt2 = (v: number) => v.toFixed(2);
-    const fmt1 = (v: number) => v.toFixed(1);
-    const safeColLabel =
-      w.safeCol === null ? "Random" : w.safeCol === "none" ? "None" : String(w.safeCol);
-    const originLabel =
-      w.origin === "top" ? "Top" : w.origin === "topAngled" ? "Top angled" : "Side";
-    return `
-      <div class="editor-dialog-body">
-        ${this.renderAdvStepper("sizeMin", "Size min", w.sizeMin, { min: 1, max: 5, step: 1, format: fmtInt })}
-        ${this.renderAdvStepper("sizeMax", "Size max", w.sizeMax, { min: 1, max: 5, step: 1, format: fmtInt })}
-        ${this.renderAdvStepper("speed", "Speed", w.baseSpeedMul, { min: 0.5, max: 3.0, step: 0.05, format: fmt2 })}
-        ${this.renderAdvStepper("wallAmp", "Wall amp", w.wallAmp, { min: 0, max: 0.5, step: 0.02, format: fmt2, disabled: !isZigzag })}
-        ${this.renderAdvStepper("wallPeriod", "Wall period", w.wallPeriod, { min: 0.05, max: 5, step: 0.1, format: fmt1, disabled: !isZigzag })}
-        ${this.renderAdvCycler("safeCol", "Safe column", safeColLabel)}
-        ${this.renderAdvCycler("origin", "Origin", originLabel)}
-        ${this.renderAdvStepper("dir", "Tilt", w.defaultDir, { min: -0.35, max: 0.35, step: 0.05, format: fmt2 })}
-        ${this.renderAdvToggle("dirRandom", "Random tilt", w.defaultDirRandom)}
-      </div>
-    `;
-  }
-
-  // Themed on/off toggle for Advanced fields. Renders as `[ OFF | ON ]`
-  // matching the look of the cycler control. Source of truth lives on
-  // the working line, so flipping it round-trips through composeWaveLine.
-  private renderAdvToggle(field: string, label: string, on: boolean): string {
-    return `
-      <div class="editor-quick-row">
-        <span class="editor-quick-label">${escapeHtml(label)}${helpTipHtml(field)}</span>
-        <div class="editor-quick-controls">
-          <button type="button" class="editor-walls-arrow"
-            data-action="editor-adv-toggle" data-field="${field}"
-            aria-pressed="${on ? "true" : "false"}">${on ? "ON" : "OFF"}</button>
-        </div>
-      </div>
-    `;
-  }
-
-  // Themed `‹ LABEL ›` cycler matching the basic Walls control. Used
-  // for Advanced fields whose values are a small fixed list (Origin,
-  // Safe column).
-  private renderAdvCycler(field: string, label: string, displayValue: string): string {
-    return `
-      <div class="editor-quick-row">
-        <span class="editor-quick-label">${escapeHtml(label)}${helpTipHtml(field)}</span>
-        <div class="editor-quick-walls-controls">
-          <button type="button" class="editor-walls-arrow"
-            data-action="editor-adv-cycle" data-field="${field}" data-dir="-1" aria-label="Previous">‹</button>
-          <span class="editor-walls-name">${escapeHtml(displayValue)}</span>
-          <button type="button" class="editor-walls-arrow"
-            data-action="editor-adv-cycle" data-field="${field}" data-dir="1" aria-label="Next">›</button>
-        </div>
-      </div>
-    `;
-  }
-
-  private toggleAdvancedField(field: string): void {
-    this.mutateDialogWave((w) => {
-      if (field === "dirRandom") w.defaultDirRandom = !w.defaultDirRandom;
-    });
-  }
-
-  private cycleAdvancedField(field: string, dir: number): void {
-    this.mutateDialogWave((w) => {
-      if (field === "origin") {
-        const opts: Array<"top" | "topAngled" | "side"> = ["top", "topAngled", "side"];
-        const idx = Math.max(0, opts.indexOf(w.origin));
-        w.origin = opts[(idx + dir + opts.length) % opts.length]!;
-      } else if (field === "safeCol") {
-        // null = random, "none" = no enforcement, 0..8 explicit columns.
-        const opts: Array<number | "none" | null> = [null, "none", 0, 1, 2, 3, 4, 5, 6, 7, 8];
-        const cur = w.safeCol;
-        let curIdx = opts.findIndex((o) => o === cur);
-        if (curIdx < 0) curIdx = 0;
-        w.safeCol = opts[(curIdx + dir + opts.length) % opts.length]!;
-      }
-    });
-  }
-
-  // Themed stepper row matching the basic-view +/- controls. Used by
-  // every numeric field in Advanced so it visually matches Count /
-  // Duration / Rate / mix on the basic bar.
-  private renderAdvStepper(
-    field: string,
-    label: string,
-    value: number,
-    opts: {
-      min: number;
-      max: number;
-      step: number;
-      format: (v: number) => string;
-      disabled?: boolean;
-      helpKey?: string;
-    },
-  ): string {
-    const disabled = !!opts.disabled;
-    const eps = opts.step * 0.001;
-    const atMin = value <= opts.min + eps;
-    const atMax = value >= opts.max - eps;
-    const helpKey = opts.helpKey ?? field;
-    return `
-      <div class="editor-quick-row${disabled ? " editor-quick-row-disabled" : ""}">
-        <span class="editor-quick-label">${escapeHtml(label)}${helpTipHtml(helpKey)}</span>
-        <div class="editor-quick-controls">
-          <button type="button" class="editor-mix-step editor-mix-minus"
-            data-action="editor-adv-bump" data-field="${field}" data-delta="${-opts.step}"
-            ${disabled || atMin ? "disabled" : ""}>−</button>
-          <span class="editor-mix-value">${opts.format(value)}</span>
-          <button type="button" class="editor-mix-step editor-mix-plus"
-            data-action="editor-adv-bump" data-field="${field}" data-delta="${opts.step}"
-            ${disabled || atMax ? "disabled" : ""}>+</button>
-        </div>
-      </div>
-    `;
-  }
 
   private bumpAdvancedField(field: string, delta: number): void {
     this.mutateDialogWave((w) => {
@@ -3410,6 +2901,28 @@ export class Game {
           w.defaultDir = clampRound(w.defaultDir + delta, -0.35, 0.35, 0.05);
           break;
         }
+      }
+    });
+  }
+
+  private toggleAdvancedField(field: string): void {
+    this.mutateDialogWave((w) => {
+      if (field === "dirRandom") w.defaultDirRandom = !w.defaultDirRandom;
+    });
+  }
+
+  private cycleAdvancedField(field: string, dir: number): void {
+    this.mutateDialogWave((w) => {
+      if (field === "origin") {
+        const opts: Array<"top" | "topAngled" | "side"> = ["top", "topAngled", "side"];
+        const idx = Math.max(0, opts.indexOf(w.origin));
+        w.origin = opts[(idx + dir + opts.length) % opts.length]!;
+      } else if (field === "safeCol") {
+        const opts: Array<number | "none" | null> = [null, "none", 0, 1, 2, 3, 4, 5, 6, 7, 8];
+        const cur = w.safeCol;
+        let curIdx = opts.findIndex((o) => o === cur);
+        if (curIdx < 0) curIdx = 0;
+        w.safeCol = opts[(curIdx + dir + opts.length) % opts.length]!;
       }
     });
   }
@@ -3560,226 +3073,10 @@ export class Game {
     });
   }
 
-  // ----- Custom Wave dialog --------------------------------------------
-
-  private renderCustomWaveDialogHtml(): string {
-    const titleText = this.editorDialogIsNewWave
-      ? "New custom wave"
-      : `Custom wave ${(this.editorDialogWaveIdx ?? 0) + 1}`;
-
-    // Palette: one row of kind buttons. Currently scrolls horizontally
-    // when the dialog is too narrow to fit all 9 kinds inline.
-    const paletteHtml = CUSTOM_WAVE_KINDS.map((k) => {
-      const sel = k === this.editorCustomWaveKind ? " selected" : "";
-      return `
-        <button type="button" class="editor-custom-kind${sel}"
-          data-action="editor-custom-kind" data-kind="${k}"
-          aria-label="${escapeHtml(k)}">
-          <canvas class="editor-custom-kind-icon" data-block-icon="${k}" width="36" height="36"></canvas>
-          <span class="editor-custom-kind-label">${escapeHtml(k.toUpperCase())}</span>
-        </button>
-      `;
-    }).join("");
-
-    // OPTIONS section (collapsible): Rate, Speed, Walls.
-    const rateBlocks = Math.round(10 / this.editorCustomWaveRate);
-    const wallsName = WALL_LABEL[this.editorCustomWaveWalls] ?? "No walls";
-    const optionsOpen = this.editorCustomWaveOptionsOpen;
-    const optionsChevron = optionsOpen ? "−" : "+";
-    const optionsHtml = `
-      <button type="button" class="editor-section-toggle" data-action="editor-custom-options-toggle">
-        <span class="editor-advanced-chevron">${optionsChevron}</span> Options
-      </button>
-      <section class="editor-quick editor-custom-options${optionsOpen ? " open" : ""}">
-        <div class="editor-quick-row">
-          <span class="editor-quick-label">Rate${helpTipHtml("rate")}</span>
-          <div class="editor-quick-controls">
-            <button type="button" class="editor-mix-step editor-mix-minus"
-              data-action="editor-custom-rate" data-delta="-5"
-              ${this.editorCustomWaveRate >= 1.95 ? "disabled" : ""}>−</button>
-            <span class="editor-mix-value">${rateBlocks}/10s</span>
-            <button type="button" class="editor-mix-step editor-mix-plus"
-              data-action="editor-custom-rate" data-delta="5"
-              ${this.editorCustomWaveRate <= 0.0501 ? "disabled" : ""}>+</button>
-          </div>
-        </div>
-        <div class="editor-quick-row">
-          <span class="editor-quick-label">Speed${helpTipHtml("speed")}</span>
-          <div class="editor-quick-controls">
-            <button type="button" class="editor-mix-step editor-mix-minus"
-              data-action="editor-custom-speed" data-delta="-0.05"
-              ${this.editorCustomWaveSpeed <= 0.55 ? "disabled" : ""}>−</button>
-            <span class="editor-mix-value">${this.editorCustomWaveSpeed.toFixed(2)}</span>
-            <button type="button" class="editor-mix-step editor-mix-plus"
-              data-action="editor-custom-speed" data-delta="0.05"
-              ${this.editorCustomWaveSpeed >= 2.95 ? "disabled" : ""}>+</button>
-          </div>
-        </div>
-        <div class="editor-quick-row">
-          <span class="editor-quick-label">Walls${helpTipHtml("walls")}</span>
-          <div class="editor-quick-walls-controls">
-            <button type="button" class="editor-walls-arrow" data-action="editor-custom-walls" data-dir="-1" aria-label="Previous wall">‹</button>
-            <span class="editor-walls-name">${escapeHtml(wallsName)}</span>
-            <button type="button" class="editor-walls-arrow" data-action="editor-custom-walls" data-dir="1" aria-label="Next wall">›</button>
-          </div>
-        </div>
-      </section>
-    `;
-
-    // Dynamic-length grid. Show only `visibleRows` rows top-down (highest
-    // index first) so the bottom row is the start of the wave (slot 0).
-    // The "Add row" button at the top inserts another empty row up to the
-    // CUSTOM_WAVE_LEN cap.
-    const visible = Math.min(this.editorCustomWaveVisibleRows, CUSTOM_WAVE_LEN);
-    const rowsHtml: string[] = [];
-    const atCap = visible >= CUSTOM_WAVE_LEN;
-    rowsHtml.push(`
-      <button type="button" class="editor-custom-addrow" data-action="editor-custom-addrow" ${atCap ? "disabled" : ""}>
-        ${atCap ? "Maximum 30 rows" : "+ Add row"}
-      </button>
-    `);
-    for (let i = visible - 1; i >= 0; i--) {
-      rowsHtml.push(this.renderCustomWaveRowHtml(i));
-    }
-    const gridHtml = `
-      <section class="editor-custom-grid" aria-label="Wave timeline">
-        ${rowsHtml.join("")}
-      </section>
-    `;
-
-    return `
-      <div class="editor-dialog-backdrop" data-action="editor-dialog-cancel"></div>
-      <div class="editor-dialog editor-dialog-custom-wave" role="dialog" aria-label="${titleText}">
-        <div class="editor-dialog-top">
-          <button type="button" class="challenge-back" data-action="editor-dialog-ok">← Save</button>
-          <h2>${escapeHtml(titleText)}</h2>
-          <span style="width:60px"></span>
-        </div>
-        ${optionsHtml}
-        <section class="editor-custom-palette">
-          <div class="editor-custom-palette-row">${paletteHtml}</div>
-        </section>
-        ${gridHtml}
-        <div class="editor-dialog-actions">
-          <button type="button" class="challenge-back" data-action="editor-dialog-cancel">Cancel</button>
-          <button type="button" class="play-btn" data-action="editor-dialog-ok">${this.editorDialogIsNewWave ? "ADD" : "OK"}</button>
-        </div>
-      </div>
-      ${this.renderCustomCellPickerHtml()}
-    `;
-  }
-
-  // Picker popup shown when the user taps a placed cell. Lets them
-  // pick a size (1-5) with a real polyhex preview and an angle (0..6
-  // for main cells; sides are fixed at 7/8). Tapping outside closes.
-  private renderCustomCellPickerHtml(): string {
-    const picker = this.editorCustomCellPicker;
-    if (!picker) return "";
-    const slot = this.editorCustomWaveSlots[picker.rowIdx];
-    if (!slot) return "";
-    const isSide = slot.side !== "main";
-    // Pickup kinds (coin / shield / drone) are always single-hex
-    // in-game — the picker greys out sizes 2-5 so the user can't author
-    // a multi-cell pickup.
-    const isPickup = slot.kind === "coin" || slot.kind === "shield" || slot.kind === "drone";
-    const sizeButtons = [1, 2, 3, 4, 5].map((s) => {
-      const disabled = isPickup && s > 1;
-      return `
-        <button type="button" class="editor-custom-pick-size${slot.size === s ? " selected" : ""}"
-          data-action="editor-custom-pick-size" data-size="${s}"
-          ${disabled ? "disabled" : ""}>
-          <canvas class="editor-custom-pick-canvas" data-shape-icon="${slot.kind}:${s}" width="44" height="44"></canvas>
-          <span class="editor-custom-pick-label">${s}</span>
-        </button>
-      `;
-    }).join("");
-    // Order angles left → straight → right for an intuitive layout.
-    const angleOrder = [5, 3, 1, 0, 2, 4, 6];
-    const angleButtons = angleOrder.map((a) => `
-      <button type="button" class="editor-custom-pick-angle${slot.angleIdx === a ? " selected" : ""}"
-        data-action="editor-custom-pick-angle" data-angle="${a}"
-        aria-label="Angle ${a}">
-        <span class="editor-custom-pick-arrow" style="transform: rotate(${angleToCssRotation(a)}deg)">↓</span>
-      </button>
-    `).join("");
-    return `
-      <div class="editor-custom-picker-backdrop" data-action="editor-custom-picker-close"></div>
-      <div class="editor-custom-picker" role="dialog" aria-label="Edit block">
-        <div class="editor-custom-picker-section">
-          <span class="editor-custom-picker-label">Size</span>
-          <div class="editor-custom-picker-sizes">${sizeButtons}</div>
-        </div>
-        ${isSide ? "" : `
-          <div class="editor-custom-picker-section">
-            <span class="editor-custom-picker-label">Direction</span>
-            <div class="editor-custom-picker-angles">${angleButtons}</div>
-          </div>
-        `}
-      </div>
-    `;
-  }
-
-  private renderCustomWaveRowHtml(rowIdx: number): string {
-    const slot = this.editorCustomWaveSlots[rowIdx];
-    const cellHtml = (
-      side: "main" | "left" | "right",
-      col: number,
-    ): string => {
-      const filled =
-        !!slot &&
-        slot.side === side &&
-        (side !== "main" || slot.col === col);
-      const sideAttr = side === "main" ? "" : ` data-side="${side}"`;
-      const colAttr = side === "main" ? ` data-col="${col}"` : "";
-      const sideCls = side === "main" ? "" : ` editor-custom-cell-side editor-custom-cell-${side}`;
-      const filledCls = filled ? " has-hex" : "";
-      const angle = filled && slot ? slot.angleIdx : 0;
-      const rot = filled ? angleToCssRotation(angle) : 0;
-      const kindAttr = filled && slot ? ` data-kind="${slot.kind}"` : "";
-      const sizeText = filled && slot ? `<span class="editor-custom-size">${slot.size}</span>` : "";
-      const arrow = filled && slot && slot.side === "main" && slot.angleIdx !== 0
-        ? `<span class="editor-custom-arrow" style="transform: rotate(${rot}deg)">↓</span>`
-        : "";
-      const iconCanvas = filled
-        ? `<canvas class="editor-custom-cell-icon" data-cell-icon="${rowIdx}-${side}-${col}" data-block-icon="${slot!.kind}" width="22" height="22"></canvas>`
-        : "";
-      return `
-        <button type="button" class="editor-custom-cell${sideCls}${filledCls}"
-          data-action="editor-custom-cell" data-row="${rowIdx}"${sideAttr}${colAttr}
-          data-has-hex="${filled ? 1 : 0}"${kindAttr}>
-          ${iconCanvas}${sizeText}${arrow}
-        </button>
-      `;
-    };
-
-    const mainCells: string[] = [];
-    for (let col = 0; col < 10; col++) mainCells.push(cellHtml("main", col));
-
-    return `
-      <div class="editor-custom-row" data-row="${rowIdx}">
-        ${cellHtml("left", 0)}
-        <div class="editor-custom-row-main">${mainCells.join("")}</div>
-        ${cellHtml("right", 0)}
-        <button type="button" class="editor-custom-clear"
-          data-action="editor-custom-clear" data-row="${rowIdx}"
-          aria-label="Clear row">×</button>
-      </div>
-    `;
-  }
-
-
 
   // True for slot-only waves (count=0 + slots) — those open in the
-  // tile-grid editor; everything else opens in the regular preset
-  // dialog so the existing cluster mix / preset machinery handles it.
-  private isCustomShapedWave(line: string): boolean {
-    try {
-      const w = parseWaveLine(line);
-      return (w.countCap === 0 || w.countCap === null) && w.slots.length > 0;
-    } catch {
-      return false;
-    }
-  }
+  // isCustomShapedWave moved to waveDsl.ts so screen modules can call
+  // it directly without going through Game.
 
   private openNewCustomWaveDialog(): void {
     if (!this.editingCustom) return;
@@ -4226,48 +3523,6 @@ export class Game {
     }
   }
 
-  // Cluster-mix block: 7 rows (one per kind). Each row shows the cluster
-  // icon, kind name, and a -/+ stepper around the current %. `normal`
-  // is the auto-balancer — it has no buttons, just shows the residual
-  // so the total always equals 100%.
-  private renderClusterMixHtml(): string {
-    const order: ClusterKind[] = ["normal", "sticky", "slow", "fast", "coin", "shield", "drone", "tiny", "big"];
-    const rows = order.map((kind) => {
-      const isNormal = kind === "normal";
-      const value = this.editorDialogPctValues[kind] ?? 0;
-      const buttons = isNormal
-        ? `<span class="editor-mix-residual">auto</span>`
-        : `
-          <button type="button" class="editor-mix-step editor-mix-minus"
-            data-action="editor-mix-bump" data-kind="${kind}" data-delta="-5"
-            ${value <= 0 ? "disabled" : ""}>−</button>
-          <span class="editor-mix-value">${value}<span class="editor-mix-pct">%</span></span>
-          <button type="button" class="editor-mix-step editor-mix-plus"
-            data-action="editor-mix-bump" data-kind="${kind}" data-delta="5"
-            ${(this.editorDialogPctValues.normal ?? 0) <= 0 ? "disabled" : ""}>+</button>
-        `;
-      const label = kind === "normal" ? "Normal" : kind.charAt(0).toUpperCase() + kind.slice(1);
-      return `
-        <div class="editor-mix-row${isNormal ? " editor-mix-row-normal" : ""}" data-mix-kind="${kind}">
-          <canvas class="editor-mix-icon" data-mix-icon="${kind}" width="36" height="36"></canvas>
-          <span class="editor-mix-name">${label}</span>
-          <div class="editor-mix-controls">
-            ${isNormal ? `<span class="editor-mix-value">${value}<span class="editor-mix-pct">%</span></span>` : ""}
-            ${buttons}
-          </div>
-        </div>
-      `;
-    }).join("");
-    return `
-      <section class="editor-mix">
-        <div class="editor-mix-header">
-          <span>Cluster mix${helpTipHtml("pct")}</span>
-          <span class="editor-mix-total">100%</span>
-        </div>
-        <div class="editor-mix-rows">${rows}</div>
-      </section>
-    `;
-  }
 
   // Adjust a non-normal kind by delta, debiting/crediting `normal` so
   // the total stays at exactly 100%. Clamps when normal would cross
@@ -4380,79 +3635,6 @@ export class Game {
 
   // ----- Settings dialog ----------------------------------------------
 
-  private renderSettingsDialogHtml(c: CustomChallenge): string {
-    const diffBtns = [1, 2, 3, 4, 5]
-      .map((d) => `<button type="button" class="editor-diff-btn${c.difficulty === d ? " selected" : ""}" data-dialog-difficulty="${d}">${d}</button>`)
-      .join("");
-    const fmtSec = (v: number) => v.toFixed(1);
-    const fmtInt = (v: number) => String(Math.round(v));
-    return `
-      <div class="editor-dialog-backdrop" data-action="editor-dialog-cancel"></div>
-      <div class="editor-dialog editor-dialog-settings" role="dialog" aria-label="Challenge settings">
-        <h2>Options</h2>
-        <div class="editor-dialog-body">
-          <div class="editor-quick-row">
-            <span class="editor-quick-label">Seed${helpTipHtml("seed")}</span>
-            <div class="editor-quick-controls">
-              <input class="editor-meta-input editor-meta-input-seed" data-editor-field="seed" type="text" inputmode="numeric" value="${c.seed}" />
-              <button type="button" class="editor-mix-step editor-mix-plus" data-action="editor-randomize-seed" aria-label="Random seed">⟳</button>
-            </div>
-          </div>
-          ${this.renderSettingsStepper("slowDuration", "Slow duration (s)", c.effects.slowDuration, { min: 0, max: 30, step: 0.5, format: fmtSec })}
-          ${this.renderSettingsStepper("fastDuration", "Fast duration (s)", c.effects.fastDuration, { min: 0, max: 30, step: 0.5, format: fmtSec })}
-          ${this.renderSettingsStepper("shieldDuration", "Shield duration (s)", c.effects.shieldDuration, { min: 0, max: 60, step: 0.5, format: fmtSec })}
-          ${this.renderSettingsStepper("droneDuration", "Drone duration (s)", c.effects.droneDuration, { min: 0, max: 60, step: 0.5, format: fmtSec })}
-          ${this.renderSettingsStepper("dangerSize", "Danger size", c.effects.dangerSize, { min: 2, max: 15, step: 1, format: fmtInt })}
-          <fieldset class="editor-radio-group">
-            <legend>Star thresholds${helpTipHtml("starsAuto")}</legend>
-            <div class="editor-stars-row">
-              ${this.renderSettingsStepper("starOne", "★", c.stars.one, { min: 0, max: 9999, step: 5, format: fmtInt })}
-              ${this.renderSettingsStepper("starTwo", "★★", c.stars.two, { min: 0, max: 9999, step: 5, format: fmtInt })}
-              ${this.renderSettingsStepper("starThree", "★★★", c.stars.three, { min: 0, max: 9999, step: 5, format: fmtInt })}
-            </div>
-            <button type="button" class="challenge-back editor-auto-btn" data-action="editor-settings-auto">Auto-suggest</button>
-          </fieldset>
-          <fieldset class="editor-radio-group">
-            <legend>Difficulty${helpTipHtml("difficulty")}</legend>
-            <div class="editor-diff-row">${diffBtns}</div>
-            <button type="button" class="challenge-back editor-auto-btn" data-action="editor-settings-auto-diff">Auto-suggest</button>
-          </fieldset>
-        </div>
-        <div class="editor-dialog-actions">
-          <button type="button" class="challenge-back" data-action="editor-dialog-cancel">Cancel</button>
-          <button type="button" class="play-btn" data-action="editor-dialog-ok">OK</button>
-        </div>
-      </div>
-    `;
-  }
-
-  // Settings dialog stepper — same visual as the basic / advanced
-  // steppers but mutates editingCustom.effects / .stars directly via
-  // bumpSettingsField. OK persists to localStorage; Cancel discards.
-  private renderSettingsStepper(
-    field: string,
-    label: string,
-    value: number,
-    opts: { min: number; max: number; step: number; format: (v: number) => string },
-  ): string {
-    const eps = opts.step * 0.001;
-    const atMin = value <= opts.min + eps;
-    const atMax = value >= opts.max - eps;
-    return `
-      <div class="editor-quick-row">
-        <span class="editor-quick-label">${escapeHtml(label)}${helpTipHtml(field)}</span>
-        <div class="editor-quick-controls">
-          <button type="button" class="editor-mix-step editor-mix-minus"
-            data-action="editor-settings-bump" data-field="${field}" data-delta="${-opts.step}"
-            ${atMin ? "disabled" : ""}>−</button>
-          <span class="editor-mix-value">${opts.format(value)}</span>
-          <button type="button" class="editor-mix-step editor-mix-plus"
-            data-action="editor-settings-bump" data-field="${field}" data-delta="${opts.step}"
-            ${atMax ? "disabled" : ""}>+</button>
-        </div>
-      </div>
-    `;
-  }
 
   private bumpSettingsField(field: string, delta: number): void {
     const c = this.editingCustom;
@@ -4669,37 +3851,10 @@ export class Game {
   }
 
   private renderUnlockShop(): void {
-    const price = this.unlockProduct?.displayPrice;
-    const priceLine = price ? `<span class="unlock-shop-price">${escapeHtml(price)}</span>` : "";
-    const buyHtml = `
-        <button type="button" class="play-btn unlock-shop-buy" data-action="iap-unlock">
-          <span>BUY</span>
-          ${priceLine}
-        </button>
-        <button type="button" class="challenge-back" data-action="iap-restore">Restore previous purchase</button>
-      `;
-    this.overlay.innerHTML = `
-      <div class="unlock-shop">
-        <div class="challenge-select-top">
-          <button type="button" class="challenge-back" data-action="unlock-shop-back">← Back</button>
-          <span style="font-size:13px; letter-spacing:0.18em; text-transform:uppercase; color:#aab4dc;">Unlock everything</span>
-          <span style="width:60px"></span>
-        </div>
-        <h1 class="unlock-shop-title">UNLOCK EVERYTHING</h1>
-        <ul class="unlock-shop-list">
-          <li><span class="unlock-shop-bullet">★</span><span>Open every challenge in all 6 blocks immediately</span></li>
-          <li><span class="unlock-shop-bullet">★</span><span>Unlock <strong>PAINFUL</strong> difficulty</span></li>
-          <li><span class="unlock-shop-bullet">★</span><span>Build and play your own challenges in the <strong>Challenge Editor</strong></span></li>
-          <li><span class="unlock-shop-bullet">★</span><span>One-time purchase, restores across devices</span></li>
-        </ul>
-        <div class="unlock-shop-actions">
-          ${buyHtml}
-        </div>
-        <p class="unlock-shop-organic">
-          Or earn it the long way: complete 3 of 5 challenges in a block to unlock the next, and score ${HARDCORE_UNLOCK_SCORE} on Hard to unlock Painful mode.
-        </p>
-      </div>
-    `;
+    this.overlay.innerHTML = UnlockShop.render({
+      priceLabel: this.unlockProduct?.displayPrice ?? null,
+      hardcoreUnlockScore: HARDCORE_UNLOCK_SCORE,
+    });
   }
 
   private openChallengeSelect(): void {
@@ -4752,327 +3907,58 @@ export class Game {
 
   private renderChallengeSelect(): void {
     const progress = loadChallengeProgress();
-    const blocks: ChallengeDef[][] = [[], [], [], [], [], []];
-    for (const c of CHALLENGES) blocks[c.block - 1]!.push(c);
-    for (const arr of blocks) arr.sort((a, b) => a.index - b.index);
-    const blockHtmlByIndex = blocks.map((arr, idx) => {
-      const blockNum = idx + 1;
-      const unlocked = progress.unlockedBlocks.includes(blockNum);
-      const completedInBlock = arr.filter((c) => progress.completed.includes(c.id)).length;
-      // A block is "fresh" once unlocked until the player attempts any
-      // challenge inside it. While fresh, every card in the block wears
-      // a NEW pill so the unlock celebration carries from the complete
-      // screen back into the menu.
-      const blockHasAttempt = arr.some(
-        (cc) =>
-          (progress.bestPct[cc.id] ?? 0) > 0 ||
-          (progress.best[cc.id] ?? 0) > 0 ||
-          progress.completed.includes(cc.id),
-      );
-      const blockIsFresh = unlocked && !blockHasAttempt;
-      const cards = arr.map((c) => {
-        const best = progress.best[c.id] ?? 0;
-        const bestPct = progress.bestPct[c.id] ?? 0;
-        const earnedStars = progress.stars[c.id] ?? 0;
-        const attempted = best > 0 || bestPct > 0 || earnedStars > 0;
-        const done = progress.completed.includes(c.id);
-        const cardCls = !unlocked
-          ? "challenge-card locked"
-          : done ? "challenge-card completed" : "challenge-card";
-        const bestScoreText = !unlocked ? "" : best > 0 ? `Best: ${best}` : "Best: —";
-        const pctText = !unlocked
-          ? ""
-          : bestPct > 0
-            ? `<span class="challenge-card-pct${bestPct >= 100 ? " full" : ""}">${bestPct}%</span>`
-            : `<span class="challenge-card-pct">—</span>`;
-        const name = unlocked ? escapeHtml(c.name) : "???";
-        const tint = difficultyTint(c.difficulty);
-        const hexes: string[] = [];
-        for (let i = 0; i < c.difficulty; i++) {
-          hexes.push(`<span class="challenge-card-hex" style="background:${tint};"></span>`);
-        }
-        const check = done ? '<span class="check">✓</span>' : "";
-        const newBadge = blockIsFresh ? '<span class="challenge-card-new">NEW</span>' : "";
-        const starsHtml = unlocked && attempted
-          ? `<div class="challenge-card-stars">${
-              [0, 1, 2].map((i) =>
-                `<span class="challenge-card-star${i < earnedStars ? " earned" : ""}">★</span>`,
-              ).join("")
-            }</div>`
-          : "";
-        return `
-          <button type="button" class="${cardCls}" data-challenge-id="${c.id}" ${unlocked ? "" : "disabled"}>
-            <span class="challenge-card-id">${c.id}</span>
-            <span class="challenge-card-name">${name}</span>
-            <div class="challenge-card-hexes">${hexes.join("")}</div>
-            ${starsHtml}
-            <span class="challenge-card-best">${bestScoreText} ${pctText}</span>
-            ${check}
-            ${newBadge}
-          </button>
-        `;
-      }).join("");
-      const blockCls = unlocked ? "challenge-block" : "challenge-block locked";
-      const headerProgress = unlocked
-        ? `<span class="progress">${completedInBlock}/5</span>`
-        : "";
-      const body = unlocked
-        ? `<div class="challenge-cards">${cards}</div>`
-        : `
-          <div class="challenge-block-lock">
-            <div class="challenge-block-lock-icon" aria-hidden="true">🔒</div>
-            <p>Complete 3 Block ${blockNum - 1} challenges to unlock</p>
-          </div>
-        `;
-      return `
-        <section class="${blockCls}">
-          <header class="challenge-block-header">
-            <span>Block ${blockNum}</span>
-            ${headerProgress}
-          </header>
-          ${body}
-        </section>
-      `;
+    const allCustoms = listCustomChallenges();
+    const authoredCustoms = allCustoms.filter((c) => !c.installedFrom);
+    const installedCustoms = allCustoms.filter((c) => !!c.installedFrom);
+    const showMyChallenges =
+      progress.purchasedUnlock || this.debugEnabled || this.isEditorTempUnlocked();
+    this.overlay.innerHTML = renderChallengeSelectView({
+      progress,
+      challenges: CHALLENGES,
+      authoredCustoms,
+      installedCustoms,
+      showMyChallenges,
+      iapPriceLabel: this.unlockProduct?.displayPrice ?? null,
+      communityReadable: isCommunityReadable(),
+      collapsed: {
+        official: loadCollapsed("official"),
+        myChallenges: loadCollapsed("myChallenges"),
+        installedChallenges: loadCollapsed("installedChallenges"),
+        community: loadCollapsed("community"),
+      },
+      installedBodyHtml:
+        installedCustoms.length > 0
+          ? this.renderInstalledChallengesBody(installedCustoms)
+          : "",
+      communityBodyHtml: isCommunityReadable() ? this.renderCommunityBody() : "",
+      leaderboardSheetHtml: this.renderLeaderboardSheetHtml(),
+      reportSheetHtml: this.renderReportSheetHtml(),
     });
-    // IAP banner: shown on every platform when not already purchased.
-    // The web build doesn't actually ship to users — keeping the banner
-    // visible there makes layout/copy review easier without round-
-    // tripping through a TestFlight build.
-    //
-    // Placement: directly after the highest-numbered unlocked block, so
-    // it sits adjacent to the wall the player is currently bumping into
-    // rather than floating at the top of the screen on every visit.
-    // Once every block is unlocked organically there's nothing the IAP
-    // can grant the player, so suppress the banner. (Custom-challenge
-    // editor access is still gated on purchasedUnlock — that's
-    // intentional and unaffected by this check.)
-    const totalBlocks = Math.max(...CHALLENGES.map((c) => c.block));
-    const allBlocksUnlocked = progress.unlockedBlocks.length >= totalBlocks;
-    const showIapBanner = !progress.purchasedUnlock && !allBlocksUnlocked;
-    const priceLabel = this.unlockProduct?.displayPrice;
-    const iapHtml = showIapBanner
-      ? `
-        <div class="iap-banner">
-          <button type="button" class="iap-buy" data-action="open-unlock-shop">
-            <span class="iap-title">Unlock All Challenges</span>
-            ${priceLabel ? `<span class="iap-price">${escapeHtml(priceLabel)}</span>` : ""}
-          </button>
-        </div>
-      `
-      : "";
-    const lastUnlockedIdx = Math.max(0, ...progress.unlockedBlocks.map((n) => n - 1));
-    const sections: string[] = [];
-    // Wrap the six official blocks (and the interleaved IAP banner) in
-    // a collapsible "Official Challenges" section so players returning
-    // to play their custom challenges or My Challenges can hide the
-    // (often very tall) roster grid. State persists across sessions
-    // via localStorage. When collapsed the inner body is hidden via
-    // CSS — the header still renders so the player can re-expand.
-    const officialCollapsed = loadCollapsed("official");
-    const completedRoster = CHALLENGES.filter((c) => progress.completed.includes(c.id)).length;
-    const officialBlocks: string[] = [];
-    blockHtmlByIndex.forEach((html, idx) => {
-      officialBlocks.push(html);
-      if (idx === lastUnlockedIdx && iapHtml) officialBlocks.push(iapHtml);
-    });
-    sections.push(renderCollapsibleSection({
-      key: "official",
-      title: "Official Challenges",
-      progress: `${completedRoster}/${CHALLENGES.length}`,
-      collapsed: officialCollapsed,
-      body: officialBlocks.join(""),
-    }));
-    // Player-authored "My Challenges" section appended after the roster
-    // and IAP banner. Shown once the IAP is owned (or in debug mode),
-    // since the editor is gated behind that — no point showing an empty
-    // section to players who can't author challenges yet.
-    if (progress.purchasedUnlock || this.debugEnabled || this.isEditorTempUnlocked()) {
-      // Same filter as the editor home: My Challenges shows only the
-      // player's authored content, not community installs (those live
-      // in Community → INSTALLED).
-      const customs = listCustomChallenges().filter((c) => !c.installedFrom);
-      if (customs.length > 0) {
-        const customCards = customs.map((c) => {
-          const tint = difficultyTint(c.difficulty);
-          const hexes: string[] = [];
-          for (let i = 0; i < c.difficulty; i++) {
-            hexes.push(`<span class="challenge-card-hex" style="background:${tint};"></span>`);
-          }
-          const starsHtml = `<div class="challenge-card-stars">${
-            [0, 1, 2].map((i) =>
-              `<span class="challenge-card-star${i < c.starsEarned ? " earned" : ""}">★</span>`,
-            ).join("")
-          }</div>`;
-          const bestText = c.best > 0 ? `Best: ${c.best}` : "Best: —";
-          return `
-            <button type="button" class="challenge-card challenge-card-custom" data-custom-challenge-id="${escapeHtml(c.id)}">
-              <span class="challenge-card-id">CUSTOM</span>
-              <span class="challenge-card-name">${escapeHtml(c.name)}</span>
-              <div class="challenge-card-hexes">${hexes.join("")}</div>
-              ${starsHtml}
-              <span class="challenge-card-best">${bestText}</span>
-            </button>
-          `;
-        }).join("");
-        sections.push(renderCollapsibleSection({
-          key: "myChallenges",
-          title: "My Challenges",
-          progress: String(customs.length),
-          collapsed: loadCollapsed("myChallenges"),
-          body: `<div class="challenge-cards challenge-cards-custom">${customCards}</div>`,
-        }));
-      }
-    }
-    // Installed Challenges section: community challenges the player
-    // has installed. Lives in its own bucket (separate from
-    // self-authored My Challenges) so the install/uninstall lifecycle
-    // is obvious. Each row supports swipe-left to UNINSTALL.
-    const installedCustoms = listCustomChallenges().filter((c) => !!c.installedFrom);
-    if (installedCustoms.length > 0) {
-      sections.push(renderCollapsibleSection({
-        key: "installedChallenges",
-        title: "Installed Challenges",
-        progress: String(installedCustoms.length),
-        collapsed: loadCollapsed("installedChallenges"),
-        body: this.renderInstalledChallengesBody(installedCustoms),
-      }));
-    }
-    // Community Challenges section. Browseable everywhere the
-    // CloudKit corpus is reachable — iOS via the native plugin, web
-    // via a read-only API token (cloudWeb.ts). When neither is wired
-    // we show a placeholder explaining the situation.
-    const communityBody = isCommunityReadable()
-      ? this.renderCommunityBody()
-      : `<div class="challenge-community-placeholder">
-          <span class="challenge-community-tag">UNAVAILABLE</span>
-          <p>Community challenges aren't reachable from this build. iOS users browse via iCloud; web visitors need a CloudKit API token configured at build time.</p>
-        </div>`;
-    sections.push(renderCollapsibleSection({
-      key: "community",
-      title: "Community Challenges",
-      collapsed: loadCollapsed("community"),
-      body: communityBody,
-    }));
-    // Lazy-load the community list the first time the section renders
-    // (and on every fresh open of challenge select after a publish/
-    // install/etc. invalidates the cache). The render call above
-    // immediately shows a "Loading…" stub; refreshCommunity flips to
-    // the populated list when the query resolves.
     if (isCommunityReadable() && !this.communityLoaded && !this.communityLoading) {
       void this.refreshCommunity();
     }
-    this.overlay.innerHTML = `
-      <div class="challenge-select">
-        <div class="challenge-select-top">
-          <button type="button" class="challenge-back" data-action="challenge-back">← Back</button>
-          <span style="font-size:13px; letter-spacing:0.18em; text-transform:uppercase; color:#aab4dc;">Challenges</span>
-          <span style="width:60px"></span>
-        </div>
-        ${sections.join("")}
-      </div>
-      ${this.renderLeaderboardSheetHtml()}
-      ${this.renderReportSheetHtml()}
-    `;
   }
 
   // ----- Community challenges -------------------------------------------
 
-  // Body markup for the Community collapsible. Uses cached state — the
-  // first render returns a "Loading…" stub and refreshCommunity()
-  // re-renders the whole challenge select once the query resolves.
+  // Body markup for the Community collapsible. Pure render delegated
+  // to ui/screens/communityBody.ts; this is just the deps gather.
   private renderCommunityBody(): string {
-    if (this.communityLoading && this.communityChallenges.length === 0) {
-      return `<div class="challenge-community-status">Loading community challenges…</div>`;
-    }
-    if (this.communityError) {
-      return `<div class="challenge-community-status">Couldn't load community challenges. Pull to retry.</div>`;
-    }
-    const sortOpts: Array<{ id: CommunitySort; label: string }> = [
-      { id: "newest", label: "NEW" },
-      { id: "topVoted", label: "TOP" },
-      { id: "mostPlayed", label: "ACTIVE" },
-    ];
-    const sortChips = sortOpts.map((o) => `
-      <button type="button" class="community-sort-chip${o.id === this.communitySort ? " selected" : ""}"
-        data-action="community-sort" data-sort="${o.id}">${o.label}</button>
-    `).join("");
-    if (this.communityChallenges.length === 0 && this.communityLoaded) {
-      return `
-        <div class="community-sort-row">${sortChips}</div>
-        <div class="challenge-community-placeholder">
-          <span class="challenge-community-tag">EMPTY</span>
-          <p>No community challenges yet. Publish one from the editor to seed the list!</p>
-        </div>
-      `;
-    }
     const installedSet = new Set(
       listCustomChallenges()
         .map((c) => c.installedFrom)
         .filter((rn): rn is string => typeof rn === "string"),
     );
-    const cards = this.communityChallenges.map((p) => {
-      const tint = difficultyTint(p.difficulty);
-      const hexes: string[] = [];
-      for (let i = 0; i < p.difficulty; i++) {
-        hexes.push(`<span class="challenge-card-hex" style="background:${tint};"></span>`);
-      }
-      const installed = installedSet.has(p.recordName);
-      const upvoted = this.upvoteCache.has(p.recordName);
-      const installedBadge = installed
-        ? `<span class="challenge-card-installed">INSTALLED</span>`
-        : "";
-      const playOrInstall = installed
-        ? `<button type="button" class="community-card-btn community-card-btn-play" data-action="community-play" data-record-name="${escapeHtml(p.recordName)}">PLAY</button>`
-        : `<button type="button" class="community-card-btn community-card-btn-install" data-action="community-install" data-record-name="${escapeHtml(p.recordName)}">INSTALL</button>`;
-      // LIKE and REPORT need user auth. On iOS that's CKContainer +
-      // iCloud login; on web it'd require CloudKit Web Auth which we
-      // haven't wired. Leaderboard is read-only and works everywhere.
-      const showAuthedActions = isCloudKitAvailable();
-      const likeBtn = showAuthedActions
-        ? `<button type="button" class="community-card-icon-btn${upvoted ? " filled-like" : ""}" data-action="community-upvote" data-record-name="${escapeHtml(p.recordName)}" aria-label="Like">${upvoted ? "♥" : "♡"}</button>`
-        : "";
-      const reportBtn = showAuthedActions
-        ? `<button type="button" class="community-card-icon-btn" data-action="community-report" data-record-name="${escapeHtml(p.recordName)}" aria-label="Report">⚑</button>`
-        : "";
-      // (Share moved to the Installed Challenges section — sharing
-      // an entry the player has installed reads as "I tried this,
-      // here, try it too" while sharing a random browse-list card
-      // would be more like a recommendation. Cleaner social loop.)
-      const waveCount = p.waves.length;
-      const waveLabel = `${waveCount} ${waveCount === 1 ? "wave" : "waves"}`;
-      return `
-        <div class="challenge-card challenge-card-community">
-          <span class="challenge-card-id">COMMUNITY</span>
-          <span class="challenge-card-name">${escapeHtml(p.name)}</span>
-          <span class="challenge-card-author">by ${escapeHtml(p.authorName)}</span>
-          <div class="challenge-card-hex-row">
-            <div class="challenge-card-hexes">${hexes.join("")}</div>
-            <span class="challenge-card-waves">${waveLabel}</span>
-          </div>
-          <div class="challenge-card-stats">
-            <span title="Installs">⬇ ${p.installCount}</span>
-            <span title="Plays">▶ ${p.playCount}</span>
-            <span title="Likes">♥ ${p.upvoteCount}</span>
-          </div>
-          ${installedBadge}
-          <div class="community-card-actions">
-            <div class="community-card-top-row">
-              ${playOrInstall}
-              <button type="button" class="community-card-btn community-card-btn-remix" data-action="community-remix" data-record-name="${escapeHtml(p.recordName)}">REMIX</button>
-            </div>
-            <div class="community-card-icon-row">
-              ${likeBtn}
-              <button type="button" class="community-card-icon-btn" data-action="community-leaderboard" data-record-name="${escapeHtml(p.recordName)}" aria-label="Leaderboard">🏆</button>
-              ${reportBtn}
-            </div>
-          </div>
-        </div>
-      `;
-    }).join("");
-    return `
-      <div class="community-sort-row">${sortChips}</div>
-      <div class="challenge-cards challenge-cards-community">${cards}</div>
-    `;
+    return renderCommunityBodyView({
+      loading: this.communityLoading,
+      loaded: this.communityLoaded,
+      error: this.communityError,
+      challenges: this.communityChallenges,
+      sort: this.communitySort,
+      installedSet,
+      upvotedSet: this.upvoteCache,
+      showAuthedActions: isCloudKitAvailable(),
+    });
   }
 
   // Body markup for the Installed Challenges collapsible. Each row uses
@@ -5081,62 +3967,10 @@ export class Game {
   // editor home — so the swipe handler picks it up automatically; only
   // the revealed action button differs (UNINSTALL not DELETE).
   private renderInstalledChallengesBody(installed: CustomChallenge[]): string {
-    const rows = installed.map((c) => {
-      const tint = difficultyTint(c.difficulty);
-      const hexes: string[] = [];
-      for (let i = 0; i < c.difficulty; i++) {
-        hexes.push(`<span class="challenge-card-hex" style="background:${tint};"></span>`);
-      }
-      const stars = [0, 1, 2]
-        .map((i) =>
-          `<span class="challenge-card-star${i < c.starsEarned ? " earned" : ""}">★</span>`,
-        )
-        .join("");
-      const attempted = c.best > 0 || c.bestPct > 0 || c.starsEarned > 0;
-      const starsHtml = attempted
-        ? `<div class="challenge-card-stars">${stars}</div>`
-        : "";
-      const bestScoreText = c.best > 0 ? `Best: ${c.best}` : "Best: —";
-      const pctText = c.bestPct > 0
-        ? `<span class="challenge-card-pct${c.bestPct >= 100 ? " full" : ""}">${c.bestPct}%</span>`
-        : `<span class="challenge-card-pct">—</span>`;
-      const author = c.installedAuthorName ?? "the community";
-      const versionStr = c.installedVersion ? ` · v${c.installedVersion}` : "";
-      const recordName = c.installedFrom ?? "";
-      // Leaderboard button is iOS-only for now (web has no auth path
-      // back to a player record yet) — but the read-only top-20 view
-      // works on web too, so wire it everywhere community is readable.
-      const leaderboardBtn = isCommunityReadable() && recordName
-        ? `<button type="button" class="editor-row-btn editor-row-btn-edit" data-action="community-leaderboard" data-record-name="${escapeHtml(recordName)}" aria-label="Leaderboard">🏆</button>`
-        : "";
-      const shareBtn = recordName
-        ? `<button type="button" class="editor-row-btn editor-row-btn-share" data-action="community-share" data-record-name="${escapeHtml(recordName)}" data-share-name="${escapeHtml(c.name)}" aria-label="Share">${IOS_SHARE_GLYPH_SVG}</button>`
-        : "";
-      return `
-        <div class="editor-home-row-swipe" data-swipe-id="${escapeHtml(c.id)}">
-          <button type="button" class="editor-home-row-delete" data-action="installed-uninstall" data-custom-id="${escapeHtml(c.id)}" tabindex="-1" aria-label="Uninstall">UNINSTALL</button>
-          <div class="editor-home-row" data-custom-id="${escapeHtml(c.id)}">
-            <div class="editor-home-row-meta">
-              <span class="challenge-card-id">COMMUNITY</span>
-              <span class="challenge-card-name">${escapeHtml(c.name)}</span>
-              <span class="editor-home-row-installed">by ${escapeHtml(author)}${versionStr}</span>
-              <div class="challenge-card-hexes">${hexes.join("")}</div>
-              ${starsHtml}
-              <span class="challenge-card-best">${bestScoreText} ${pctText}</span>
-            </div>
-            <div class="editor-home-row-actions">
-              <button type="button" class="editor-row-btn editor-row-btn-play" data-action="installed-play" data-custom-id="${escapeHtml(c.id)}">PLAY</button>
-              <button type="button" class="editor-row-btn editor-row-btn-edit" data-action="editor-remix-custom" data-custom-id="${escapeHtml(c.id)}">REMIX</button>
-              <div class="editor-home-row-actions-pair">
-                ${leaderboardBtn}
-                ${shareBtn}
-              </div>
-            </div>
-          </div>
-        </div>
-      `;
-    }).join("");
-    return `<div class="editor-home-rows">${rows}</div>`;
+    return renderInstalledChallengesBodyView({
+      installed,
+      showLeaderboard: isCommunityReadable(),
+    });
   }
 
   // Open the single-challenge view for a deep-link record name. Used
@@ -5184,78 +4018,26 @@ export class Game {
   private renderSingleChallenge(): void {
     const sheet = this.singleChallenge;
     if (!sheet) return;
-    let body: string;
-    if (sheet.error) {
-      body = `<div class="challenge-community-status">${escapeHtml(sheet.error)}</div>`;
-    } else if (!sheet.challenge) {
-      body = `<div class="challenge-community-status">Loading shared challenge…</div>`;
-    } else {
-      const p = sheet.challenge;
-      const tint = difficultyTint(p.difficulty);
-      const hexes: string[] = [];
-      for (let i = 0; i < p.difficulty; i++) {
-        hexes.push(`<span class="challenge-card-hex" style="background:${tint};"></span>`);
-      }
-      const installed = !!listCustomChallenges().find((c) => c.installedFrom === p.recordName);
-      const upvoted = this.upvoteCache.has(p.recordName);
-      const showAuthedActions = isCloudKitAvailable();
-      const playOrInstall = installed
-        ? `<button type="button" class="community-card-btn community-card-btn-play" data-action="community-play" data-record-name="${escapeHtml(p.recordName)}">PLAY</button>`
-        : `<button type="button" class="community-card-btn community-card-btn-install" data-action="community-install" data-record-name="${escapeHtml(p.recordName)}">INSTALL</button>`;
-      const likeBtn = showAuthedActions
-        ? `<button type="button" class="community-card-icon-btn${upvoted ? " filled-like" : ""}" data-action="community-upvote" data-record-name="${escapeHtml(p.recordName)}" aria-label="Like">${upvoted ? "♥" : "♡"}</button>`
-        : "";
-      const reportBtn = showAuthedActions
-        ? `<button type="button" class="community-card-icon-btn" data-action="community-report" data-record-name="${escapeHtml(p.recordName)}" aria-label="Report">⚑</button>`
-        : "";
-      const shareBtn = `<button type="button" class="community-card-icon-btn" data-action="community-share" data-record-name="${escapeHtml(p.recordName)}" data-share-name="${escapeHtml(p.name)}" aria-label="Share">${IOS_SHARE_GLYPH_SVG}</button>`;
-      const installedBadge = installed
-        ? `<span class="challenge-card-installed">INSTALLED</span>`
-        : "";
-      const waveCount = p.waves.length;
-      const waveLabel = `${waveCount} ${waveCount === 1 ? "wave" : "waves"}`;
-      body = `
-        <div class="single-challenge-card">
-          <span class="challenge-card-id">SHARED CHALLENGE</span>
-          <h1 class="single-challenge-name">${escapeHtml(p.name)}</h1>
-          <span class="single-challenge-author">by ${escapeHtml(p.authorName)}</span>
-          <div class="single-challenge-hex-row">
-            <div class="challenge-card-hexes">${hexes.join("")}</div>
-            <span class="challenge-card-waves">${waveLabel}</span>
-          </div>
-          <div class="challenge-card-stats single-challenge-stats">
-            <span title="Installs">⬇ ${p.installCount}</span>
-            <span title="Plays">▶ ${p.playCount}</span>
-            <span title="Likes">♥ ${p.upvoteCount}</span>
-          </div>
-          ${installedBadge}
-          <div class="single-challenge-actions">
-            <div class="community-card-top-row">
-              ${playOrInstall}
-              <button type="button" class="community-card-btn community-card-btn-remix" data-action="community-remix" data-record-name="${escapeHtml(p.recordName)}">REMIX</button>
-            </div>
-            <div class="community-card-icon-row">
-              ${likeBtn}
-              <button type="button" class="community-card-icon-btn" data-action="community-leaderboard" data-record-name="${escapeHtml(p.recordName)}" aria-label="Leaderboard">🏆</button>
-              ${reportBtn}
-              ${shareBtn}
-            </div>
-          </div>
-        </div>
-      `;
-    }
-    this.overlay.innerHTML = `
-      <div class="single-challenge">
-        <div class="challenge-select-top">
-          <button type="button" class="challenge-back" data-action="single-back">← Back</button>
-          <span style="font-size:13px; letter-spacing:0.18em; text-transform:uppercase; color:#aab4dc;">Shared</span>
-          <span style="width:60px"></span>
-        </div>
-        ${body}
-      </div>
-      ${this.renderLeaderboardSheetHtml()}
-      ${this.renderReportSheetHtml()}
-    `;
+    const recordName = sheet.challenge?.recordName ?? sheet.recordName;
+    const lbSheet = this.leaderboardSheet;
+    const lbChallenge = lbSheet
+      ? this.communityChallenges.find((c) => c.recordName === lbSheet.recordName)
+      : undefined;
+    this.overlay.innerHTML = SingleChallenge.render({
+      challenge: sheet.challenge,
+      error: sheet.error,
+      installed: !!listCustomChallenges().find((c) => c.installedFrom === recordName),
+      upvoted: this.upvoteCache.has(recordName),
+      showAuthedActions: isCloudKitAvailable(),
+      leaderboardSheet: lbSheet ? {
+        title: lbChallenge ? lbChallenge.name : "Leaderboard",
+        loading: lbSheet.loading,
+        rows: lbSheet.rows,
+      } : null,
+      reportSheet: this.reportSheet
+        ? { reason: this.reportSheet.reason, note: this.reportSheet.note }
+        : null,
+    });
   }
 
   private async refreshCommunity(): Promise<void> {
@@ -5397,38 +4179,11 @@ export class Game {
     const sheet = this.leaderboardSheet;
     if (!sheet) return "";
     const challenge = this.communityChallenges.find((c) => c.recordName === sheet.recordName);
-    const title = challenge ? challenge.name : "Leaderboard";
-    let body: string;
-    if (sheet.loading) {
-      body = `<div class="leaderboard-status">Loading…</div>`;
-    } else if (sheet.rows.length === 0) {
-      body = `<div class="leaderboard-status">No scores yet — be the first.</div>`;
-    } else {
-      body = `<ol class="leaderboard-rows">${sheet.rows.map((r, i) => {
-        const playLabel = `${r.attempts} ${r.attempts === 1 ? "play" : "plays"}`;
-        return `
-          <li class="leaderboard-row">
-            <span class="leaderboard-rank">${i + 1}</span>
-            <span class="leaderboard-name">
-              <span class="leaderboard-player">${escapeHtml(r.playerName)}</span>
-              <span class="leaderboard-attempts">${playLabel}</span>
-            </span>
-            <span class="leaderboard-score">${r.score}</span>
-          </li>
-        `;
-      }).join("")}</ol>`;
-    }
-    return `
-      <div class="modal-backdrop" data-action="close-leaderboard">
-        <div class="modal-sheet leaderboard-sheet" role="dialog" aria-label="Leaderboard">
-          <header class="modal-sheet-header">
-            <span>${escapeHtml(title)}</span>
-            <button type="button" class="modal-close" data-action="close-leaderboard" aria-label="Close">✕</button>
-          </header>
-          ${body}
-        </div>
-      </div>
-    `;
+    return LeaderboardSheet.render({
+      title: challenge ? challenge.name : "Leaderboard",
+      loading: sheet.loading,
+      rows: sheet.rows,
+    });
   }
 
   private openReportDialog(recordName: string): void {
@@ -5442,37 +4197,7 @@ export class Game {
   }
 
   private renderReportSheetHtml(): string {
-    const sheet = this.reportSheet;
-    if (!sheet) return "";
-    const reasons: Array<{ id: ReportReason; label: string }> = [
-      { id: "inappropriate_name", label: "Inappropriate name" },
-      { id: "offensive_content", label: "Offensive content" },
-      { id: "unplayable", label: "Broken / unplayable" },
-      { id: "other", label: "Other" },
-    ];
-    const radios = reasons.map((r) => `
-      <label class="report-reason">
-        <input type="radio" name="report-reason" value="${r.id}" ${r.id === sheet.reason ? "checked" : ""} />
-        <span>${r.label}</span>
-      </label>
-    `).join("");
-    return `
-      <div class="modal-backdrop" data-action="close-report">
-        <div class="modal-sheet report-sheet" role="dialog" aria-label="Report challenge">
-          <header class="modal-sheet-header">
-            <span>Report challenge</span>
-            <button type="button" class="modal-close" data-action="close-report" aria-label="Close">✕</button>
-          </header>
-          <div class="report-body">
-            ${radios}
-            <textarea class="report-note" maxlength="240" rows="3" placeholder="Optional note (240 chars)" data-report-note>${escapeHtml(sheet.note)}</textarea>
-          </div>
-          <div class="report-actions">
-            <button type="button" class="play-btn report-submit" data-action="submit-report">SUBMIT</button>
-          </div>
-        </div>
-      </div>
-    `;
+    return ReportSheet.render(this.reportSheet);
   }
 
   private async submitReport(): Promise<void> {
@@ -5493,25 +4218,13 @@ export class Game {
   private renderChallengeIntro(): void {
     const def = this.activeChallenge;
     if (!def) return;
-    const progress = loadChallengeProgress();
-    const best = progress.best[def.id] ?? 0;
-    const tint = difficultyTint(def.difficulty);
-    const hexes: string[] = [];
-    for (let i = 0; i < def.difficulty; i++) {
-      hexes.push(
-        `<span class="challenge-card-hex" style="background:${tint}; width:14px; height:16px;"></span>`,
-      );
-    }
-    this.overlay.innerHTML = `
-      <div class="challenge-intro">
-        <span class="id">${def.id}</span>
-        <h1>${escapeHtml(def.name)}</h1>
-        <div class="challenge-card-hexes" style="gap:4px;">${hexes.join("")}</div>
-        <p class="meta">${def.waves.length} waves${best > 0 ? ` · Best: ${best}` : ""}</p>
-        <button type="button" class="play-btn" data-action="challenge-go">START</button>
-        <button type="button" class="challenge-back" data-action="challenge-back">← Back</button>
-      </div>
-    `;
+    this.overlay.innerHTML = ChallengeIntro.render({
+      id: def.id,
+      name: def.name,
+      difficulty: def.difficulty,
+      waveCount: def.waves.length,
+      best: loadChallengeProgress().best[def.id] ?? 0,
+    });
     this.overlay.classList.remove("hidden");
   }
 
@@ -5522,111 +4235,28 @@ export class Game {
     const customRecord = isCustom ? getCustomChallenge(def.id) : undefined;
     const progress = loadChallengeProgress();
     const best = isCustom ? (customRecord?.best ?? 0) : (progress.best[def.id] ?? 0);
-    const newBest = this.score >= best;
     const thresholds = isCustom && customRecord
       ? customRecord.stars
       : computeStarThresholds(def);
-    const earned = awardStars(this.score, thresholds);
-    const starHtml: string[] = [];
-    for (let i = 0; i < 3; i++) {
-      const filled = i < earned;
-      starHtml.push(
-        `<span class="challenge-star${filled ? " earned" : " empty"}" data-star-idx="${i}">★</span>`,
-      );
-    }
-    // Score-bar markup: a track from 0 to max(score, 3★) + 5% headroom,
-    // with three tier ticks (1★ / 2★ / 3★) and a fill that animates from
-    // 0 → score so the player can see how close they came to the next
-    // tier. The bar fill drives the star-pop timing — each earned star
-    // pops the moment the fill reaches its threshold.
-    const tiers = [thresholds.one, thresholds.two, thresholds.three];
-    const barMax = Math.max(this.score, thresholds.three) * 1.05;
-    const fillPct = Math.min(100, (this.score / barMax) * 100);
-    const tierPcts = tiers.map((t) => Math.min(100, (t / barMax) * 100));
-    const tierMarkers = tiers
-      .map((t, i) => {
-        const pct = tierPcts[i]!.toFixed(2);
-        return `
-          <div class="bar-tier" style="left:${pct}%;">
-            <span class="bar-tier-star">★</span>
-            <span class="bar-tier-score">${t}</span>
-          </div>
-        `;
-      })
-      .join("");
-    // "Block N Unlocked" banner if this completion crossed a 3-of-5
-    // threshold. Stacked in case a multi-block jump ever happens.
-    const unlockBanner = newlyUnlocked.length > 0
-      ? newlyUnlocked
-          .map(
-            (b) =>
-              `<p class="challenge-unlock-banner">Block ${b} Unlocked</p>`,
-          )
-          .join("")
-      : "";
-    const idLabel = isCustom ? "CUSTOM" : def.id;
-    this.overlay.innerHTML = `
-      <div class="challenge-intro">
-        <p class="challenge-complete-banner">Challenge Complete</p>
-        <span class="id">${escapeHtml(idLabel)}</span>
-        <h1>${escapeHtml(def.name)}</h1>
-        <div class="challenge-stars-big">${starHtml.join("")}</div>
-        <div class="challenge-score-bar">
-          <div class="bar-track">
-            <div class="bar-fill"></div>
-            ${tierMarkers}
-            <div class="bar-marker" style="left:${fillPct.toFixed(2)}%;">
-              <span class="bar-marker-score">${this.score}</span>
-            </div>
-          </div>
-        </div>
-        <p class="tagline">${newBest ? "NEW BEST" : `Best ${best}`}</p>
-        ${unlockBanner}
-        <button type="button" class="play-btn" data-action="play">PLAY AGAIN</button>
-        <button type="button" class="challenge-back" data-action="challenge-back">Back</button>
-        <button type="button" class="challenge-back" data-action="challenge-menu">Main menu</button>
-      </div>
-    `;
+    const props = {
+      idLabel: isCustom ? "CUSTOM" : def.id,
+      name: def.name,
+      score: this.score,
+      best,
+      isNewBest: this.score >= best,
+      thresholds,
+      earnedStars: awardStars(this.score, thresholds),
+      newlyUnlocked,
+      onStarPop: (_i: number, earned: boolean) => {
+        if (earned) playSfx("impact");
+      },
+    };
+    this.overlay.innerHTML = ChallengeComplete.render(props);
     this.overlay.classList.remove("hidden");
     this.setScoreVisible(false);
     this.setHudVisible(false);
     this.setInPlay(false);
-
-    // Animation timing: bar fills 0 → fillPct over BAR_DURATION_MS. Each
-    // earned star pops the instant the fill visually crosses its tier
-    // tick (so the bar and star reveals stay locked together). Unearned
-    // stars pop dimly at the very end so the row stays visible.
-    const fillEl = this.overlay.querySelector<HTMLDivElement>(".bar-fill");
-    const markerEl = this.overlay.querySelector<HTMLDivElement>(".bar-marker");
-    const BAR_DURATION_MS = 1100;
-    const POST_BAR_DELAY_MS = 260;
-    if (fillEl && markerEl) {
-      // Start at 0 and let CSS transition push to the final width on the
-      // next frame. The marker rides along on the same transition.
-      fillEl.style.transition = `width ${BAR_DURATION_MS}ms cubic-bezier(0.22, 0.61, 0.36, 1)`;
-      markerEl.style.transition = `left ${BAR_DURATION_MS}ms cubic-bezier(0.22, 0.61, 0.36, 1), opacity 200ms ease-out`;
-      requestAnimationFrame(() => {
-        fillEl.style.width = `${fillPct.toFixed(2)}%`;
-        markerEl.classList.add("show");
-      });
-    }
-    const starEls = Array.from(
-      this.overlay.querySelectorAll<HTMLSpanElement>(".challenge-star"),
-    );
-    starEls.forEach((el, i) => {
-      const threshold = tiers[i]!;
-      const reachedAt = this.score >= threshold
-        // Fill animates linearly with eased curve, but for tier-pop
-        // timing we use a simple linear approximation: time to threshold
-        // = (threshold / score) × duration. Close enough that the pop
-        // visually coincides with the tick crossing.
-        ? Math.min(BAR_DURATION_MS, (threshold / Math.max(1, this.score)) * BAR_DURATION_MS)
-        : BAR_DURATION_MS + POST_BAR_DELAY_MS;
-      window.setTimeout(() => {
-        el.classList.add("pop");
-        if (el.classList.contains("earned")) playSfx("impact");
-      }, reachedAt);
-    });
+    ChallengeComplete.bind?.(this.overlay, props);
   }
 
   // TEMP — see EDITOR_TEMP_UNLOCKED_ON_IOS at the top of this file.
@@ -5690,11 +4320,9 @@ export class Game {
     this.seenKinds = new Set();
     this.rotateTutorialShown = false;
     this.controlsHintShown = false;
-    try {
-      localStorage.removeItem(SEEN_HINTS_STORAGE_KEY);
-      localStorage.removeItem(ROTATE_TUTORIAL_STORAGE_KEY);
-      localStorage.removeItem(CONTROLS_HINT_STORAGE_KEY);
-    } catch { /* ignore */ }
+    removeKey(SEEN_HINTS_STORAGE_KEY);
+    removeKey(ROTATE_TUTORIAL_STORAGE_KEY);
+    removeKey(CONTROLS_HINT_STORAGE_KEY);
     const original = btn.textContent ?? "Hints";
     btn.textContent = "Reset!";
     btn.disabled = true;
@@ -5826,51 +4454,28 @@ export class Game {
     if (musicBtn) musicBtn.setAttribute("aria-pressed", String(music));
   }
 
-  private difficultyButtonsHtml(): string {
-    return `
-      <div id="difficultyButtons" class="difficulty-buttons" role="group" aria-label="Difficulty">
-        <button type="button" data-difficulty="easy">EASY</button>
-        <button type="button" data-difficulty="medium">MEDIUM</button>
-        <button type="button" data-difficulty="hard">HARD</button>
-        <button type="button" data-difficulty="hardcore">PAINFUL</button>
-      </div>
-    `;
-  }
+  // difficultyButtonsHtml inlined into the GameOver screen template.
 
   private renderGameOver(): void {
     if (this.gameMode === "challenge" && this.activeChallenge) {
       const def = this.activeChallenge;
-      const progress = loadChallengeProgress();
-      const best = progress.best[def.id] ?? 0;
-      const pct = Math.max(0, Math.min(100, Math.round(this.progress * 100)));
-      const pctCls = pct >= 100 ? "challenge-pct full" : "challenge-pct partial";
-      this.overlay.innerHTML = `
-        <div class="challenge-gameover">
-          <h1>GAME OVER</h1>
-          <p class="tagline">${escapeHtml(def.name)} · ${def.id}</p>
-          <div class="${pctCls}">${pct}%</div>
-          <p class="tagline">Score ${this.score} · Best ${best}</p>
-          <button type="button" class="play-btn" data-action="play">RETRY</button>
-          <button type="button" class="challenge-back" data-action="challenge-back">Back to challenges</button>
-          <button type="button" class="challenge-back" data-action="challenge-menu">Main menu</button>
-        </div>
-      `;
+      const best = loadChallengeProgress().best[def.id] ?? 0;
+      this.overlay.innerHTML = GameOver.render({
+        mode: "challenge",
+        score: this.score,
+        best,
+        challengeName: def.name,
+        challengeId: def.id,
+        challengeProgress: this.progress,
+      });
       this.overlay.classList.remove("hidden");
       return;
     }
-    this.overlay.innerHTML = `
-      <h1>GAME OVER</h1>
-      <p class="tagline">Score ${this.score} &middot; Best ${this.best}</p>
-      <div class="play-group">
-        ${this.difficultyButtonsHtml()}
-        <button type="button" class="play-btn" data-action="play">PLAY AGAIN</button>
-      </div>
-      <button type="button" class="challenge-back" data-action="challenge-menu">Main menu</button>
-      <section class="achievements">
-        <h2>Achievements <span id="achievementCount" class="achievement-count" aria-live="polite"></span></h2>
-        <div id="achievementBadges" class="achievement-badges" aria-label="Earned achievements"></div>
-      </section>
-    `;
+    this.overlay.innerHTML = GameOver.render({
+      mode: "endless",
+      score: this.score,
+      best: this.best,
+    });
     this.overlay.classList.remove("hidden");
     this.renderAchievementBadges();
     this.refreshDifficultyButtons();
@@ -6328,12 +4933,8 @@ export class Game {
       // Threshold achievements for the size of the banked payout. Award the
       // highest tier that the pool clears so a single big payout doesn't
       // pop four banners back-to-back.
-      for (let i = BONUS_POOL_TIERS.length - 1; i >= 0; i--) {
-        if (banked >= BONUS_POOL_TIERS[i]!.threshold) {
-          this.awardAchievement(BONUS_POOL_TIERS[i]!.id);
-          break;
-        }
-      }
+      const tierId = highestTierCrossed(banked, BONUS_POOL_TIERS);
+      if (tierId) this.awardAchievement(tierId as AchievementId);
       // Multiplier achievements based on the peak the player held when the
       // bonus actually banked. Same single-tier rule as the pool tiers.
       if (mul >= 6) this.awardAchievement(ACHIEVEMENTS.bonus6x);
@@ -7395,7 +5996,7 @@ export class Game {
     // rotate gesture.
     if (sizeBefore === 1 && this.player.size() > 1 && !this.rotateTutorialShown) {
       this.rotateTutorialShown = true;
-      try { localStorage.setItem(ROTATE_TUTORIAL_STORAGE_KEY, "1"); } catch { /* ignore */ }
+      saveBool(ROTATE_TUTORIAL_STORAGE_KEY, true);
       this.rotateTutorialActive = true;
       this.rotateTutorialTimer = 0;
       this.rotateTutorialStartAngle = this.player.body.angle;
@@ -8253,24 +6854,7 @@ export class Game {
   // ----- Wave / difficulty system -----
 
   private waveParams() {
-    const s = this.score;
-    return {
-      // Wave grows from short to long with score.
-      waveDuration: Math.min(8, 2.2 + s * 0.06),
-      // Calm shrinks but never below 2.5s, so player always gets a breather.
-      calmDuration: Math.max(2.5, 7 - s * 0.07),
-      // Wave spawn cadence: faster than calm, scales with score.
-      waveSpawnInterval: Math.max(0.32, 0.55 - s * 0.005),
-      // Calm spawn cadence: existing curve, with the difficulty's
-      // starting interval scaling — easy waits longer, hard kicks off
-      // faster. The min floor still caps how tight it can get.
-      calmSpawnInterval: Math.max(
-        SPAWN_INTERVAL_MIN,
-        SPAWN_INTERVAL_START * this.cfg().spawnIntervalMul - s * SPAWN_INTERVAL_RAMP,
-      ),
-      // Wave fall speed multiplier on top of base.
-      waveSpeedMul: Math.min(2.5, 1.5 + s * 0.015),
-    };
+    return computeWaveParams(this.score, this.cfg().spawnIntervalMul);
   }
 
   private currentSpawnInterval(): number {
@@ -8298,14 +6882,10 @@ export class Game {
     return base;
   }
 
-  // Late-game permanent speed-up: every 100 points past 500 raises the
-  // game's base rate by 10%, so 600 → 1.1×, 1000 → 1.5×, 1500 → 2.0×.
-  // Slow / fast / hint / tutorial modifiers all multiply on top, so a
-  // 1.0× slow at score 1000 is 0.75× wall-clock and a 1.25× fast is
-  // 1.875×. Capped at 1.8× so the game stays playable at extreme scores.
+  // Score-driven cadence math lives in src/spawn.ts (Phase 1.5);
+  // this is a thin forwarder so call sites stay short.
   private lateGameSpeedMul(): number {
-    const raw = 1 + Math.max(0, (this.score - LATE_RAMP_FLOOR_SCORE) / 100) * LATE_RAMP_PER_100;
-    return Math.min(1.8, raw);
+    return lateGameSpeedMul(this.score);
   }
 
   private advanceWavePhase(dt: number): void {
@@ -8339,7 +6919,7 @@ export class Game {
   }
 
   private loadDifficulty(): Difficulty {
-    const v = localStorage.getItem(DIFFICULTY_STORAGE_KEY);
+    const v = loadString(DIFFICULTY_STORAGE_KEY, "");
     if (v === "easy" || v === "medium" || v === "hard" || v === "hardcore") {
       // Defensive: drop hardcore back to medium if the player loaded it
       // last session and has since lost the unlock (e.g. a new install
@@ -8351,11 +6931,11 @@ export class Game {
   }
 
   private loadBestFor(d: Difficulty): number {
-    return Number(localStorage.getItem(HIGH_SCORE_KEY_PREFIX + d) ?? 0) || 0;
+    return Number(loadString(HIGH_SCORE_KEY_PREFIX + d, "0")) || 0;
   }
 
   private saveBestFor(d: Difficulty, best: number): void {
-    localStorage.setItem(HIGH_SCORE_KEY_PREFIX + d, String(best));
+    saveString(HIGH_SCORE_KEY_PREFIX + d, String(best));
   }
 
   // Hardcore mode is locked until the player either scores HARDCORE_THRESHOLD
@@ -8364,13 +6944,13 @@ export class Game {
   // ?debug=1 also opens it so test sessions can pick PAINFUL without grinding.
   private isHardcoreUnlocked(): boolean {
     if (this.debugEnabled) return true;
-    if (localStorage.getItem(HARDCORE_UNLOCK_KEY) === "1") return true;
+    if (loadBool(HARDCORE_UNLOCK_KEY, false)) return true;
     return loadChallengeProgress().purchasedUnlock;
   }
 
   private grantHardcoreUnlock(): void {
-    if (localStorage.getItem(HARDCORE_UNLOCK_KEY) === "1") return;
-    localStorage.setItem(HARDCORE_UNLOCK_KEY, "1");
+    if (loadBool(HARDCORE_UNLOCK_KEY, false)) return;
+    saveBool(HARDCORE_UNLOCK_KEY, true);
   }
 
   // Called from the score-update path during a hard run. Cheap — just a
@@ -8379,7 +6959,7 @@ export class Game {
     if (this.debugEnabled) return; // debug runs don't dirty real unlock state
     if (this.difficulty !== "hard") return;
     if (this.score < HARDCORE_UNLOCK_SCORE) return;
-    if (localStorage.getItem(HARDCORE_UNLOCK_KEY) === "1") return;
+    if (loadBool(HARDCORE_UNLOCK_KEY, false)) return;
     this.grantHardcoreUnlock();
     // Floater so the moment is visible mid-run.
     this.spawnFloater(
@@ -8409,7 +6989,7 @@ export class Game {
   private setDifficulty(d: Difficulty): void {
     if (d === this.difficulty) return;
     this.difficulty = d;
-    localStorage.setItem(DIFFICULTY_STORAGE_KEY, d);
+    saveString(DIFFICULTY_STORAGE_KEY, d);
     this.best = this.loadBestFor(d);
     this.bestEl.textContent = String(this.best);
     // The gameover overlay bakes "Best {n}" into its innerHTML; re-render
@@ -8943,12 +7523,9 @@ export class Game {
     // against the endless leaderboard.
     if (this.gameMode === "challenge") return;
     const milestones = SCORE_MILESTONES_BY_DIFFICULTY[this.difficulty];
-    while (this.nextMilestoneIdx < milestones.length) {
-      const m = milestones[this.nextMilestoneIdx]!;
-      if (this.score < m.threshold) break;
-      this.awardAchievement(m.id);
-      this.nextMilestoneIdx += 1;
-    }
+    const { nextIdx, awarded } = stepMilestones(this.score, milestones, this.nextMilestoneIdx);
+    for (const id of awarded) this.awardAchievement(id as AchievementId);
+    this.nextMilestoneIdx = nextIdx;
     // Hardcore organic unlock: scoring HARDCORE_UNLOCK_SCORE on hard
     // grants the difficulty for future runs.
     this.maybeUnlockHardcore();
@@ -9284,121 +7861,13 @@ export class Game {
 }
 
 // Help-text strings for editor form fields. Surfaced via small (i)
-// info buttons rendered next to each label by `helpTipHtml`. Keep
-// each line short — the popup is narrow.
-const FIELD_HELP: Record<string, string> = {
-  // Wave dialog (advanced + presets share keys where applicable).
-  sizeMin: "Smallest cluster size that can spawn (1 = single hex, 5 = giant blob).",
-  sizeMax: "Largest cluster size that can spawn.",
-  speed: "Cluster fall-speed multiplier. 1.0 = base, 2.0 = double speed.",
-  rate: "How many blocks fall per 10 seconds. Higher = denser wave.",
-  slotRate: "Seconds between slot-stream spawns (only for slot-pattern waves).",
-  count: "Maximum probabilistic spawns. Wave ends after this many. Blank = no cap.",
-  dur: "Hard time limit in seconds. Wave ends when timer expires. Blank = none.",
-  walls: "Wall configuration: pinch (red panels), zigzag (sinusoidal), narrow (tight corridor).",
-  wallAmp: "Amplitude of zigzag walls (0 = flat, 0.5 = max curve).",
-  wallPeriod: "Period of zigzag walls (higher = wider waves).",
-  safeCol: "Column kept clear of normal spawns. random = picks one each play, none = no enforcement.",
-  origin: "Where clusters enter from. top = above, topAngled = above with tilt, side = horizontal entry.",
-  dir: "Tilt angle applied to every spawn. Negative leans left, positive leans right.",
-  dirRandom: "Randomise tilt per spawn within ±Tilt instead of using a fixed bias.",
-  pct: "Probability weight per cluster kind. Numbers are relative to each other.",
-  amp: "Amplitude of the zigzag walls (0 = flat, 0.5 = max curve).",
-  // Settings dialog.
-  difficulty: "Visual difficulty rating shown on the challenge card. 1 = easy, 5 = hardest.",
-  slowDuration: "Seconds of 0.5x time after picking up a SLOW block.",
-  fastDuration: "Seconds of 1.25x time + bonus pool after picking up a FAST block.",
-  shieldDuration: "Seconds of bubble protection after picking up a SHIELD block.",
-  droneDuration: "Seconds the drone sentinel stays active after pickup.",
-  dangerSize: "How big your blob can grow before the danger glow appears and the next blue hit ends the run. Lower = harder.",
-  starOne: "Score required for 1 star.",
-  starTwo: "Score required for 2 stars.",
-  starThree: "Score required for 3 stars.",
-  starsAuto: "Auto-suggest computes stars from your wave content. Adjust afterwards if you like.",
-  // Edit screen.
-  name: `Display name for your challenge (max ${MAX_CUSTOM_NAME_LEN} characters).`,
-  seed: "RNG seed. The same seed produces the same cluster sequence on every replay.",
-};
-
-// Render a small (i) info button + hidden popup for a field. Click
-// toggles the popup. Empty string when the key has no help entry.
-// Render a collapsible section on the challenge select screen
-// (Official Challenges, My Challenges, Community). Header is a
-// button with chevron + title + optional progress label. Body is
-// the inner HTML, hidden via CSS when `.collapsed`.
-function renderCollapsibleSection(opts: {
-  key: CollapsibleKey;
-  title: string;
-  progress?: string;
-  collapsed: boolean;
-  body: string;
-}): string {
-  const progressHtml = opts.progress
-    ? `<span class="progress">${escapeHtml(opts.progress)}</span>`
-    : "";
-  return `
-    <section class="challenge-official${opts.collapsed ? " collapsed" : ""}">
-      <button type="button" class="challenge-official-header"
-        data-action="toggle-collapse" data-section="${opts.key}"
-        aria-expanded="${opts.collapsed ? "false" : "true"}">
-        <span class="challenge-official-chevron" aria-hidden="true">${opts.collapsed ? "▶" : "▼"}</span>
-        <span class="challenge-official-title">${escapeHtml(opts.title)}</span>
-        ${progressHtml}
-      </button>
-      <div class="challenge-official-body">${opts.body}</div>
-    </section>
-  `;
-}
-
-function helpTipHtml(key: string, override?: string): string {
-  const text = override ?? FIELD_HELP[key];
-  if (!text) return "";
-  return `<span class="editor-help-wrap">
-    <button type="button" class="editor-help-btn" data-action="editor-toggle-help" aria-label="Help">i</button>
-    <span class="editor-help-text" hidden>${escapeHtml(text)}</span>
-  </span>`;
-}
-
-// Compose a DSL line from a ParsedWave. Inverse of parseWaveLine for
-// the editor — used when an always-visible control (count, dur, walls)
-// mutates the working line. Slots and weights are passed through; the
-// editor's mix lives in editorDialogPctValues and is applied at OK time
-// instead, so we omit `pct=` here to keep the working line clean.
-function composeWaveLine(w: ParsedWave): string {
-  const tokens: string[] = [];
-  if (w.sizeMin === w.sizeMax) tokens.push(`size=${w.sizeMin}`);
-  else tokens.push(`size=${w.sizeMin}-${w.sizeMax}`);
-  tokens.push(`speed=${w.baseSpeedMul}`);
-  tokens.push(`rate=${w.spawnInterval}`);
-  if (Math.abs(w.slotInterval - w.spawnInterval) > 0.001) {
-    tokens.push(`slotRate=${w.slotInterval}`);
-  }
-  if (w.countCap !== null) tokens.push(`count=${w.countCap}`);
-  if (w.durOverride !== null) tokens.push(`dur=${w.durOverride}`);
-  if (w.walls !== "none") {
-    tokens.push(`walls=${w.walls}`);
-    if (w.walls === "zigzag") {
-      tokens.push(`wallAmp=${w.wallAmp}`);
-      tokens.push(`wallPeriod=${w.wallPeriod}`);
-    }
-  }
-  if (w.safeCol === "none") tokens.push("safeCol=none");
-  else if (typeof w.safeCol === "number") tokens.push(`safeCol=${w.safeCol}`);
-  if (w.origin !== "top") tokens.push(`origin=${w.origin}`);
-  if (w.defaultDir !== 0) tokens.push(`dir=${w.defaultDir}`);
-  if (w.defaultDirRandom) tokens.push(`dirRandom=1`);
-  for (const s of w.slots) {
-    if (s === null) tokens.push("000");
-    else tokens.push(`${slotKindToPrefix(s.kind)}${s.size}${s.col}${s.angleIdx}`);
-  }
-  return tokens.join(", ");
-}
+// FIELD_HELP + helpTipHtml moved to src/ui/components/helpTip.ts so
+// screen modules can import directly. composeWaveLine moved to
+// waveDsl.ts (Phase 1.6) so it lives next to its inverse parseWaveLine.
 
 // Hard cap on rows in the Custom Wave editor. Each row maps to one slot
 // token in the DSL output (skipped rows emit "000").
-// iOS-style share glyph (square with up arrow). Inline SVG so it
-// renders identically across platforms and respects currentColor.
-const IOS_SHARE_GLYPH_SVG = `<svg viewBox="0 0 16 22" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" width="14" height="14"><path d="M8 0L3.5 4.5l1.06 1.06L7.25 2.87V14h1.5V2.87l2.69 2.69L12.5 4.5 8 0z" fill="currentColor"/><path d="M2 8H1a1 1 0 00-1 1v12a1 1 0 001 1h14a1 1 0 001-1V9a1 1 0 00-1-1h-1v1.5h1V20.5H1.5V9.5h1V8z" fill="currentColor"/></svg>`;
+// IOS_SHARE_GLYPH_SVG moved to src/ui/components/icons.ts in Phase 2.
 
 const CUSTOM_WAVE_LEN = 30;
 
@@ -9407,37 +7876,8 @@ const CUSTOM_WAVE_KINDS: ClusterKind[] = [
 ];
 
 const WALL_CYCLE: WallKind[] = ["none", "pinch", "zigzag", "narrow"];
-const WALL_LABEL: Record<WallKind, string> = {
-  none: "No walls",
-  pinch: "Pinch",
-  zigzag: "Zigzag",
-  narrow: "Narrow",
-};
 
-// Validate a single wave line. Catches parse errors and the "does
-// nothing" case (no count, no slots, no dur+rate) — same rule as
-// validateChallenge in waveDsl.ts but per-line for the editor's
-// row-level warning badge.
-function checkWaveLine(line: string): { ok: true } | { ok: false; reason: string } {
-  let parsed: ParsedWave;
-  try {
-    parsed = parseWaveLine(line);
-  } catch (e) {
-    return { ok: false, reason: `Parse error: ${(e as Error).message}` };
-  }
-  const hasCount = parsed.countCap !== null && parsed.countCap > 0;
-  const hasSlots = parsed.slots.length > 0;
-  const probDisabledByZeroCount = parsed.countCap === 0;
-  const hasDur =
-    parsed.durOverride !== null &&
-    parsed.durOverride > 0 &&
-    parsed.spawnInterval > 0 &&
-    !probDisabledByZeroCount;
-  if (!hasCount && !hasSlots && !hasDur) {
-    return { ok: false, reason: "Wave does nothing — set a count, a duration, or a slot pattern." };
-  }
-  return { ok: true };
-}
+// checkWaveLine moved to waveDsl.ts so it lives next to parseWaveLine.
 
 // Parse a wave DSL line and project its weights into a 7-key %-summing
 // map. Used when opening the wave dialog on an existing wave so the
@@ -9471,16 +7911,8 @@ function parseLineToMix(line: string): Partial<Record<ClusterKind, number>> {
 }
 
 
-// CSS rotation to apply to the small `↓` arrow that visualises a slot's
-// angle in the custom-wave grid. ANGLE_TABLE tilts are radians; CSS
-// rotate is clockwise, so for `↓` (head pointing down) a positive
-// rotation pushes the head left. Right-motion (positive tilt) needs a
-// negative CSS rotation; left-motion needs positive. Negate to map.
-function angleToCssRotation(angleIdx: number): number {
-  const tilts = [0, -0.15, 0.15, -0.35, 0.35, -0.6, 0.6, -0.4, 0.4, 0];
-  const tilt = tilts[Math.max(0, Math.min(9, angleIdx))] ?? 0;
-  return -tilt * (180 / Math.PI);
-}
+// angleToCssRotation moved to src/ui/components/angles.ts so screen
+// modules can import directly.
 
 // Clamp a numeric value into [min, max] and round to the nearest
 // `step`. Used by the Advanced steppers so each bump lands on a clean
@@ -9502,14 +7934,7 @@ function cssAttrEscape(s: string): string {
   return s.replace(/["\\]/g, (ch) => `\\${ch.charCodeAt(0).toString(16)} `);
 }
 
-function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
+// escapeHtml moved to src/ui/escape.ts in Phase 2.
 
 // Render a single block icon into the given canvas, mirroring the in-game
 // look so the BLOCKS guide stays visually consistent with the actual
@@ -9618,91 +8043,9 @@ function paintCellOnCanvas(
   ctx.stroke();
 }
 
-function drawBlockIcon(canvas: HTMLCanvasElement, kind: ClusterKind): void {
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return;
-  const w = canvas.width;
-  const h = canvas.height;
-  const cx = w / 2;
-  const cy = h / 2;
-  const hexSize = Math.min(w, h) * 0.32;
-  ctx.clearRect(0, 0, w, h);
+// drawBlockIcon moved to src/ui/components/blockIcon.ts in Phase 2.
 
-  if (kind === "coin") {
-    const r = hexSize * 0.95;
-    const glowR = hexSize * 1.6;
-    ctx.save();
-    ctx.globalCompositeOperation = "lighter";
-    const halo = ctx.createRadialGradient(cx, cy, 0, cx, cy, glowR);
-    halo.addColorStop(0, "rgba(255, 170, 70, 0.85)");
-    halo.addColorStop(0.5, "rgba(220, 130, 30, 0.45)");
-    halo.addColorStop(1, "rgba(0,0,0,0)");
-    ctx.fillStyle = halo;
-    ctx.beginPath();
-    ctx.arc(cx, cy, glowR, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.restore();
-    const grad = ctx.createRadialGradient(cx - r * 0.3, cy - r * 0.3, 0, cx, cy, r);
-    grad.addColorStop(0, "#fff1c2");
-    grad.addColorStop(0.45, "#ffb255");
-    grad.addColorStop(1, "#a14e08");
-    ctx.fillStyle = grad;
-    ctx.beginPath();
-    ctx.arc(cx, cy, r, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = "rgba(255, 240, 200, 0.95)";
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
-    return;
-  }
-
-  if (kind === "normal") {
-    pathHex(ctx, cx, cy, hexSize);
-    const grad = ctx.createLinearGradient(0, cy - hexSize, 0, cy + hexSize);
-    grad.addColorStop(0, "#aac4ff");
-    grad.addColorStop(1, "#5b8bff");
-    ctx.fillStyle = grad;
-    ctx.fill();
-    ctx.lineWidth = 1.5;
-    ctx.strokeStyle = "#1c2348";
-    ctx.stroke();
-    return;
-  }
-
-  // Helpful kinds: same drawAsBlob recipe as cluster.ts.
-  const palette = blobPalette(kind);
-  const r = hexSize * 0.85;
-  const glowR = hexSize * 1.7;
-  ctx.save();
-  ctx.globalCompositeOperation = "lighter";
-  const halo = ctx.createRadialGradient(cx, cy, 0, cx, cy, glowR);
-  halo.addColorStop(0, palette.haloInner);
-  halo.addColorStop(0.5, palette.haloMid);
-  halo.addColorStop(1, "rgba(0,0,0,0)");
-  ctx.fillStyle = halo;
-  ctx.beginPath();
-  ctx.arc(cx, cy, glowR, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.restore();
-  const core = ctx.createRadialGradient(cx - r * 0.3, cy - r * 0.3, 0, cx, cy, r);
-  core.addColorStop(0, palette.coreLight);
-  core.addColorStop(1, palette.coreDark);
-  ctx.fillStyle = core;
-  ctx.beginPath();
-  ctx.arc(cx, cy, r, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.strokeStyle = "rgba(255, 255, 255, 0.6)";
-  ctx.lineWidth = 1.5;
-  ctx.stroke();
-}
-
-// Difficulty banding for the challenge-select hexes: 1-2 = green
-// (chill), 3-4 = yellow (heat), 5 = red (top of the ladder).
-function difficultyTint(d: number): string {
-  if (d >= 5) return "#e64545";
-  if (d >= 3) return "#ffd76b";
-  return "#7fe89c";
-}
+// difficultyTint moved to src/ui/components/blockIcon.ts in Phase 2.
 
 function generateStars(
   w: number,

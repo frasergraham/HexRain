@@ -7,8 +7,11 @@
 import { parseWaveLine, type ChallengeDefLike } from "./waveDsl";
 import type { ChallengeDef } from "./challenges";
 import { syncProgressUp } from "./cloudSync";
+import { clamp, clampDifficulty, clampStars, numOr } from "./validation";
+import { loadJson, saveJson } from "./storage";
+import { STORAGE_KEYS } from "./storageKeys";
 
-const STORAGE_KEY = "hexrain.customChallenges.v1";
+const STORAGE_KEY = STORAGE_KEYS.customChallenges;
 
 export const MAX_WAVES_PER_CUSTOM = 100;
 export const MAX_CUSTOM_NAME_LEN = 36;
@@ -169,45 +172,22 @@ function fillDefaults(c: Partial<CustomChallenge>): CustomChallenge {
   };
 }
 
-function numOr(v: unknown, fallback: number): number {
-  return typeof v === "number" && Number.isFinite(v) ? v : fallback;
-}
-
-function clamp(v: number, lo: number, hi: number): number {
-  return Math.max(lo, Math.min(hi, v));
-}
-
-function clampDifficulty(v: number): 1 | 2 | 3 | 4 | 5 {
-  return clamp(Math.round(v), 1, 5) as 1 | 2 | 3 | 4 | 5;
-}
-
-function clampStars(v: number): 0 | 1 | 2 | 3 {
-  return clamp(Math.round(v), 0, 3) as 0 | 1 | 2 | 3;
-}
+// Numeric helpers (clamp, numOr, clampDifficulty, clampStars) live in
+// src/validation.ts and are shared with cloudSync's record marshalling.
 
 export function loadCustomChallenges(): CustomChallengeStore {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { ...EMPTY_STORE };
-    const parsed = JSON.parse(raw) as Partial<CustomChallengeStore> | null;
-    if (!parsed || parsed.v !== 1 || !Array.isArray(parsed.challenges)) {
-      return { ...EMPTY_STORE };
-    }
-    const challenges = parsed.challenges
-      .filter((c) => !!c && typeof c === "object")
-      .map((c) => fillDefaults(c as Partial<CustomChallenge>));
-    return { v: 1, challenges };
-  } catch {
+  const parsed = loadJson<Partial<CustomChallengeStore> | null>(STORAGE_KEY, null);
+  if (!parsed || parsed.v !== 1 || !Array.isArray(parsed.challenges)) {
     return { ...EMPTY_STORE };
   }
+  const challenges = parsed.challenges
+    .filter((c) => !!c && typeof c === "object")
+    .map((c) => fillDefaults(c as Partial<CustomChallenge>));
+  return { v: 1, challenges };
 }
 
 function saveStore(store: CustomChallengeStore): void {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
-  } catch {
-    // ignore quota / private mode
-  }
+  saveJson(STORAGE_KEY, store);
   // Push the updated custom-challenge set to the user's private CloudKit
   // DB (no-op on web / no iCloud). syncProgressUp is debounced internally.
   syncProgressUp();
@@ -332,35 +312,53 @@ export function saveCustomChallengeRun(
 // or no wave actually does anything (count > 0, slots, or dur+rate).
 // Returns a list of human-readable errors — empty array means OK.
 export function validateCustomChallenge(c: CustomChallenge): string[] {
-  const errors: string[] = [];
-  if (!c.name.trim()) errors.push("Name cannot be empty.");
+  return [
+    ...validateName(c),
+    ...validateWaveCount(c),
+    ...validateWaveLines(c),
+  ];
+}
+
+function validateName(c: CustomChallenge): string[] {
+  return c.name.trim() ? [] : ["Name cannot be empty."];
+}
+
+function validateWaveCount(c: CustomChallenge): string[] {
   if (!Array.isArray(c.waves) || c.waves.length === 0) {
-    errors.push("Challenge needs at least one wave.");
-    return errors;
+    return ["Challenge needs at least one wave."];
   }
   if (c.waves.length > MAX_WAVES_PER_CUSTOM) {
-    errors.push(`Too many waves (max ${MAX_WAVES_PER_CUSTOM}).`);
+    return [`Too many waves (max ${MAX_WAVES_PER_CUSTOM}).`];
   }
+  return [];
+}
+
+function validateWaveLines(c: CustomChallenge): string[] {
+  if (!Array.isArray(c.waves) || c.waves.length === 0) return [];
+  const errors: string[] = [];
   for (let i = 0; i < c.waves.length; i++) {
-    const line = c.waves[i]!;
-    try {
-      const parsed = parseWaveLine(line);
-      const hasCount = parsed.countCap !== null && parsed.countCap > 0;
-      const hasSlots = parsed.slots.length > 0;
-      const probDisabledByZeroCount = parsed.countCap === 0;
-      const hasDur =
-        parsed.durOverride !== null &&
-        parsed.durOverride > 0 &&
-        parsed.spawnInterval > 0 &&
-        !probDisabledByZeroCount;
-      if (!hasCount && !hasSlots && !hasDur) {
-        errors.push(`Wave ${i + 1}: wave does nothing.`);
-      }
-    } catch (e) {
-      errors.push(`Wave ${i + 1}: ${(e as Error).message}`);
-    }
+    const err = validateOneWaveLine(c.waves[i]!);
+    if (err) errors.push(`Wave ${i + 1}: ${err}`);
   }
   return errors;
+}
+
+function validateOneWaveLine(line: string): string | null {
+  let parsed;
+  try {
+    parsed = parseWaveLine(line);
+  } catch (e) {
+    return (e as Error).message;
+  }
+  const hasCount = parsed.countCap !== null && parsed.countCap > 0;
+  const hasSlots = parsed.slots.length > 0;
+  const probDisabledByZeroCount = parsed.countCap === 0;
+  const hasDur =
+    parsed.durOverride !== null &&
+    parsed.durOverride > 0 &&
+    parsed.spawnInterval > 0 &&
+    !probDisabledByZeroCount;
+  return hasCount || hasSlots || hasDur ? null : "wave does nothing.";
 }
 
 // Stamp the publish state on the author's local record after a publish

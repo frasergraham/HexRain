@@ -31,7 +31,7 @@ PAINFUL difficulty so test runs don't need IAP state in localStorage.
 | --- | --- |
 | `main.ts` | DOM bootstrap; instantiates `Game`; cold-launch CloudKit pull + subscription |
 | `game.ts` | Engine, state machine, spawn/wave/score/effect logic, all challenge / editor / community UI |
-| `player.ts` | Compound body that grows/shrinks; bounds-based clamps |
+| `player.ts` | Compound body that grows/shrinks; bounds-based clamps; auto-runs connectivity sweep on cell mutations |
 | `cluster.ts` | Falling cluster bodies + render (hex / glowy blob / coin) |
 | `debris.ts` | Free-floating tumbling fragments that fade out |
 | `hex.ts` | Axial math + polyhex shape library + `pathHex` |
@@ -40,17 +40,25 @@ PAINFUL difficulty so test runs don't need IAP state in localStorage.
 | `style.css` | Layout, HUD, touch controls, editor + community card styling |
 | `analytics.ts` | GoatCounter pings for play / score / challenge starts |
 | `audio.ts` | SFX + music with toggles |
-| `rng.ts` | Seeded mulberry32 used by challenges + custom challenges |
-| `waveDsl.ts` | `parseWaveLine` + `validateChallenge` for the wave DSL |
+| `rng.ts` | Canonical seeded mulberry32 + FNV-1a `hashSeed` (single source of truth) |
+| `waveDsl.ts` | `parseWaveLine` + `composeWaveLine` (round-trip) + `validateChallenge` for the wave DSL |
 | `wavePresets.ts` | Editor preset library (calm rain, scripted, etc.) |
 | `wavePreview.ts` | Renders the small wave-preview canvas in the editor |
 | `challenges.ts` | Roster of 30 hand-authored challenges, `ChallengeProgress` persistence, star thresholds |
-| `customChallenges.ts` | Player-authored challenge store (`hexrain.customChallenges.v1`), publish/install metadata |
+| `customChallenges.ts` | Player-authored challenge store, publish/install metadata, validators |
 | `storeKit.ts` | iOS StoreKit 2 bridge for the "Unlock All Challenges" IAP |
 | `gameCenter.ts` | iOS Game Center bridge: auth, leaderboards, achievements, display name |
 | `cloudKit.ts` | iOS CloudKit bridge — generic upsert/fetch/query/delete + subscription |
-| `cloudSync.ts` | High-level sync: progress mirror, publish/install/leaderboard/upvote/report |
+| `cloudWeb.ts` | Web read-only CloudKit Web Services REST client (uses `VITE_CLOUDKIT_API_TOKEN`) |
+| `cloudSync.ts` | High-level sync: progress mirror, publish/install/leaderboard/upvote/report; dispatches reads to native or web |
+| `share.ts` | `shareChallenge(name, recordName)` — Web Share API + clipboard fallback for deep links |
 | `moderation.ts` | Client-side bad-words / length / non-printable check on community names |
+| **`storage.ts`** | Typed wrappers: `loadString/saveString`, `loadBool/saveBool`, `loadJson/saveJson`, `removeKey`. Single chokepoint for all `localStorage` |
+| **`storageKeys.ts`** | Registry of every `hexrain.*` key the app reads or writes |
+| **`palettes.ts`** | All `ClusterKind` colour data: `blobPalette`, `hintPalette`, `debrisPalette` (re-exported from `cluster.ts` and used by `debris.ts`) |
+| **`validation.ts`** | `clamp`, `clampDifficulty`, `clampStars`, `numOr` — shared by custom-challenge loader + CloudKit field marshalling |
+| **`spawn.ts`** | `lateGameSpeedMul(score)` + `computeWaveParams(score, spawnIntervalMul)` — pure score-driven cadence |
+| **`scoring.ts`** | `stepMilestones(score, tiers, startIdx)` + `highestTierCrossed(banked, tiers)` — pure milestone awards |
 
 iOS native plugins live in `ios/App/CapApp-SPM/Sources/CapApp-SPM/`:
 `StoreKitPlugin.swift`, `GameCenterPlugin.swift`, `CloudKitPlugin.swift`.
@@ -237,9 +245,10 @@ of the current wave so the author can see what they're authoring before
 playing it.
 
 The editor is gated behind `purchasedUnlock || debugEnabled` plus
-`EDITOR_TEMP_UNLOCKED_ON_IOS` (set in `game.ts`) which currently
-auto-unlocks the editor on iOS while the IAP flow stabilises in
-TestFlight. Revert that constant before shipping the editor publicly.
+the `VITE_EDITOR_UNLOCKED` env flag (default `"1"` in `.env.example`)
+which currently auto-unlocks the editor on iOS while the IAP flow
+stabilises in TestFlight. Set it to `"0"` for a ship build that
+re-locks the editor behind the IAP.
 
 ### Community challenges (CloudKit)
 
@@ -410,5 +419,5 @@ SHIELD_/DRONE_*                                 shield + drone
 LATE_RAMP_FLOOR_SCORE, LATE_RAMP_PER_100        endless ramp
 HARDCORE_UNLOCK_SCORE                           PAINFUL difficulty unlock
 ROTATE_SLIDE_SENS                               touch rotation feel
-EDITOR_TEMP_UNLOCKED_ON_IOS                     editor temp-unlock toggle
+VITE_EDITOR_UNLOCKED (env)                      editor temp-unlock toggle
 ```

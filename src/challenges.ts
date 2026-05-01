@@ -6,8 +6,10 @@
 // stored under a single localStorage key.
 
 import type { ClusterKind } from "./types";
-import { parseWaveLine, validateChallenge, type ChallengeDefLike } from "./waveDsl";
+import { parseWaveLine, type ChallengeDefLike } from "./waveDsl";
 import { syncProgressUp } from "./cloudSync";
+import { loadJson, saveJson } from "./storage";
+import { STORAGE_KEYS } from "./storageKeys";
 
 export interface ChallengeDef extends ChallengeDefLike {
   // ChallengeDefLike already includes id, name, difficulty, block, index, effects, waves.
@@ -35,7 +37,7 @@ export interface ChallengeStarThresholds {
   three: number;
 }
 
-const STORAGE_KEY = "hexrain.challenges.v1";
+const STORAGE_KEY = STORAGE_KEYS.challengeProgress;
 
 // `?debug=1` unlocks every block immediately and disables challenge-progress
 // persistence so test runs (including the 199 / 399 / 599 score buttons) don't
@@ -706,39 +708,31 @@ export function awardStars(score: number, t: ChallengeStarThresholds): 0 | 1 | 2
 // === Persistence ==========================================================
 
 export function loadChallengeProgress(): ChallengeProgress {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { ...EMPTY_PROGRESS };
-    const parsed = JSON.parse(raw) as Partial<ChallengeProgress> | null;
-    if (!parsed || parsed.v !== 1) return { ...EMPTY_PROGRESS };
-    const validIds = new Set(CHALLENGES.map((c) => c.id));
-    const bestEntries = Object.entries(parsed.best ?? {}).filter(([id]) => validIds.has(id));
-    const bestPctEntries = Object.entries(parsed.bestPct ?? {}).filter(([id]) => validIds.has(id));
-    const starsEntries = Object.entries(parsed.stars ?? {})
-      .filter(([id]) => validIds.has(id))
-      .map(([id, n]) => [id, Math.max(0, Math.min(3, Math.round(Number(n) || 0)))] as const);
-    const completed = (parsed.completed ?? []).filter((id) => validIds.has(id));
-    const unique = Array.from(new Set(completed)).sort();
-    const purchasedUnlock = parsed.purchasedUnlock === true;
-    return {
-      v: 1,
-      best: Object.fromEntries(bestEntries),
-      bestPct: Object.fromEntries(bestPctEntries),
-      stars: Object.fromEntries(starsEntries),
-      completed: unique,
-      unlockedBlocks: recomputeUnlocked(new Set(unique), purchasedUnlock),
-      purchasedUnlock,
-    };
-  } catch {
-    return { ...EMPTY_PROGRESS };
-  }
+  const parsed = loadJson<Partial<ChallengeProgress> | null>(STORAGE_KEY, null);
+  if (!parsed || parsed.v !== 1) return { ...EMPTY_PROGRESS };
+  const validIds = new Set(CHALLENGES.map((c) => c.id));
+  const bestEntries = Object.entries(parsed.best ?? {}).filter(([id]) => validIds.has(id));
+  const bestPctEntries = Object.entries(parsed.bestPct ?? {}).filter(([id]) => validIds.has(id));
+  const starsEntries = Object.entries(parsed.stars ?? {})
+    .filter(([id]) => validIds.has(id))
+    .map(([id, n]) => [id, Math.max(0, Math.min(3, Math.round(Number(n) || 0)))] as const);
+  const completed = (parsed.completed ?? []).filter((id) => validIds.has(id));
+  const unique = Array.from(new Set(completed)).sort();
+  const purchasedUnlock = parsed.purchasedUnlock === true;
+  return {
+    v: 1,
+    best: Object.fromEntries(bestEntries),
+    bestPct: Object.fromEntries(bestPctEntries),
+    stars: Object.fromEntries(starsEntries),
+    completed: unique,
+    unlockedBlocks: recomputeUnlocked(new Set(unique), purchasedUnlock),
+    purchasedUnlock,
+  };
 }
 
 function save(p: ChallengeProgress): void {
   if (DEBUG_MODE) return;
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(p));
-  } catch { /* ignore quota / private mode */ }
+  saveJson(STORAGE_KEY, p);
   // Mirror to CloudKit private DB if available. Debounced inside
   // syncProgressUp so a flurry of saves only triggers one round-trip.
   syncProgressUp();
@@ -806,31 +800,6 @@ function recomputeUnlocked(completed: Set<string>, purchasedUnlock = false): num
   return out;
 }
 
-// === Validation guard (dev only) ==========================================
-
-if (import.meta.env?.DEV) {
-  const ids = new Set<string>();
-  const blockCounts = new Map<number, number>();
-  const errors: string[] = [];
-  for (const c of CHALLENGES) {
-    if (ids.has(c.id)) errors.push(`Duplicate challenge id ${c.id}`);
-    ids.add(c.id);
-    blockCounts.set(c.block, (blockCounts.get(c.block) ?? 0) + 1);
-    for (const e of validateChallenge(c)) errors.push(`[${c.id}] ${e}`);
-    // Sanity-parse every wave (validateChallenge already did this, but
-    // double-check so a bad wave throws here with a clear stack trace).
-    for (let i = 0; i < c.waves.length; i++) {
-      try { parseWaveLine(c.waves[i]); }
-      catch (e) {
-        errors.push(`[${c.id}] wave ${i + 1}: ${(e as Error).message}`);
-      }
-    }
-  }
-  for (const [b, n] of blockCounts) {
-    if (n !== 5) errors.push(`Block ${b} has ${n} challenges (expected 5)`);
-  }
-  if (errors.length) {
-    // eslint-disable-next-line no-console
-    console.error("[challenges] validation errors:\n" + errors.join("\n"));
-  }
-}
+// Roster validation lives in tests/challenges-defs.test.ts (Phase 4.1).
+// CI fails the build if any check trips, instead of just printing to
+// console.error in the dev environment.

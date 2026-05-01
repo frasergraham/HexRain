@@ -52,6 +52,10 @@ import {
   type CustomChallengeStars,
 } from "./customChallenges";
 import { checkName, type ModerationResult } from "./moderation";
+import { hashSeed } from "./rng";
+import { clampDifficulty, clampStars } from "./validation";
+import { loadString, saveJson, saveString } from "./storage";
+import { STORAGE_KEYS } from "./storageKeys";
 
 // ---------- Identity ------------------------------------------------------
 
@@ -174,26 +178,23 @@ export async function pullProgressDown(): Promise<void> {
 // repeated cold launches don't keep overwriting fresh local edits with
 // stale cloud copies just because the cloud record's modifiedAt happens
 // to be newer than the local file mtime (which we can't read).
-const PROGRESS_LOCAL_MODIFIED_KEY = "hexrain.cloudSync.progressModifiedAt";
+const PROGRESS_LOCAL_MODIFIED_KEY = STORAGE_KEYS.cloudProgressModifiedAt;
 
 function readLocalProgressModified(): number {
-  try {
-    const raw = localStorage.getItem(PROGRESS_LOCAL_MODIFIED_KEY);
-    return raw ? parseInt(raw, 10) || 0 : 0;
-  } catch {
-    return 0;
-  }
+  return parseInt(loadString(PROGRESS_LOCAL_MODIFIED_KEY, "0"), 10) || 0;
 }
 
-function writeLocalProgressFromCloud(payload: string, modifiedAt: number): void {
+// Exported only for tests — production callers go through pullProgressDown.
+export function writeLocalProgressFromCloud(payload: string, modifiedAt: number): void {
+  let parsed: ChallengeProgress | null;
   try {
-    const parsed = JSON.parse(payload) as ChallengeProgress;
-    if (!parsed || parsed.v !== 1) return;
-    localStorage.setItem("hexrain.challenges.v1", JSON.stringify(parsed));
-    localStorage.setItem(PROGRESS_LOCAL_MODIFIED_KEY, String(modifiedAt));
+    parsed = JSON.parse(payload) as ChallengeProgress;
   } catch {
-    /* ignore malformed cloud payload */
+    return; // malformed cloud payload
   }
+  if (!parsed || parsed.v !== 1) return;
+  saveJson(STORAGE_KEYS.challengeProgress, parsed);
+  saveString(PROGRESS_LOCAL_MODIFIED_KEY, String(modifiedAt));
 }
 
 // ---------- Public (community) -------------------------------------------
@@ -553,16 +554,12 @@ function makePublishedRecordName(authorId: string, sourceCustomId: string): stri
   return `pub-${shortHash(authorId)}-${shortHash(sourceCustomId)}`;
 }
 
-// Quick non-cryptographic hash → short hex string. CloudKit record
+// Quick non-cryptographic hash → short base-36 string. CloudKit record
 // names allow [A-Za-z0-9_-] up to 255 chars; we just need stable
-// readable per-(author, custom) identifiers.
+// readable per-(author, custom) identifiers. Uses the canonical FNV-1a
+// hash in rng.ts so we don't carry three copies of it across the repo.
 function shortHash(input: string): string {
-  let h = 2166136261 >>> 0;
-  for (let i = 0; i < input.length; i++) {
-    h ^= input.charCodeAt(i);
-    h = Math.imul(h, 16777619) >>> 0;
-  }
-  return h.toString(36);
+  return hashSeed(input).toString(36);
 }
 
 function customChallengeToFields(c: CustomChallenge): Record<string, CloudKitField> {
@@ -587,93 +584,79 @@ function customChallengeToFields(c: CustomChallenge): Record<string, CloudKitFie
   };
 }
 
-function fieldsToCustomChallenge(rec: CloudKitRecord): CustomChallenge | null {
-  try {
-    const id = rec.recordName;
-    const effects = JSON.parse(stringField(rec.fields["effects"]) ?? "{}") as CustomChallengeEffects;
-    const stars = JSON.parse(stringField(rec.fields["stars"]) ?? "{}") as CustomChallengeStars;
-    const wavesRaw = rec.fields["waves"];
-    const waves: string[] = Array.isArray(wavesRaw)
-      ? (wavesRaw as unknown[]).filter((w): w is string => typeof w === "string")
-      : [];
-    return {
-      id,
-      name: stringField(rec.fields["name"]) ?? "Untitled",
-      seed: numberField(rec.fields["seed"]) ?? 0,
-      difficulty: clampDifficulty(numberField(rec.fields["difficulty"]) ?? 3),
-      effects: {
-        slowDuration: effects.slowDuration ?? 5,
-        fastDuration: effects.fastDuration ?? 5,
-        shieldDuration: effects.shieldDuration ?? 10,
-        droneDuration: effects.droneDuration ?? 10,
-        dangerSize: effects.dangerSize ?? 7,
-      },
-      stars: {
-        one: stars.one ?? 1,
-        two: stars.two ?? 2,
-        three: stars.three ?? 3,
-      },
-      waves,
-      createdAt: numberField(rec.fields["createdAt"]) ?? Date.now(),
-      updatedAt: numberField(rec.fields["updatedAt"]) ?? Date.now(),
-      best: numberField(rec.fields["best"]) ?? 0,
-      bestPct: numberField(rec.fields["bestPct"]) ?? 0,
-      starsEarned: clampStars(numberField(rec.fields["starsEarned"]) ?? 0),
-      remixedFrom: stringField(rec.fields["remixedFrom"]) || undefined,
-      publishedRecordName: stringField(rec.fields["publishedRecordName"]) || undefined,
-      publishedVersion: numberField(rec.fields["publishedVersion"]) || undefined,
-      installedFrom: stringField(rec.fields["installedFrom"]) || undefined,
-      installedVersion: numberField(rec.fields["installedVersion"]) || undefined,
-      installedAuthorName: stringField(rec.fields["installedAuthorName"]) || undefined,
-    };
-  } catch {
-    return null;
+// Shared decoders for the JSON-encoded sub-objects on both record
+// types (effects + stars). Tolerates missing / malformed JSON by
+// returning the per-field defaults.
+function decodeEffects(raw: string | null): CustomChallengeEffects {
+  let parsed: Partial<CustomChallengeEffects> = {};
+  if (raw) {
+    try { parsed = JSON.parse(raw) as Partial<CustomChallengeEffects>; } catch { /* fall back */ }
   }
+  return {
+    slowDuration: parsed.slowDuration ?? 5,
+    fastDuration: parsed.fastDuration ?? 5,
+    shieldDuration: parsed.shieldDuration ?? 10,
+    droneDuration: parsed.droneDuration ?? 10,
+    dangerSize: parsed.dangerSize ?? 7,
+  };
+}
+
+function decodeStars(raw: string | null): CustomChallengeStars {
+  let parsed: Partial<CustomChallengeStars> = {};
+  if (raw) {
+    try { parsed = JSON.parse(raw) as Partial<CustomChallengeStars>; } catch { /* fall back */ }
+  }
+  return { one: parsed.one ?? 1, two: parsed.two ?? 2, three: parsed.three ?? 3 };
+}
+
+function decodeWaves(raw: CloudKitField | undefined): string[] {
+  return Array.isArray(raw) ? (raw as unknown[]).filter((w): w is string => typeof w === "string") : [];
+}
+
+function fieldsToCustomChallenge(rec: CloudKitRecord): CustomChallenge | null {
+  return {
+    id: rec.recordName,
+    name: stringField(rec.fields["name"]) ?? "Untitled",
+    seed: numberField(rec.fields["seed"]) ?? 0,
+    difficulty: clampDifficulty(numberField(rec.fields["difficulty"]) ?? 3),
+    effects: decodeEffects(stringField(rec.fields["effects"])),
+    stars: decodeStars(stringField(rec.fields["stars"])),
+    waves: decodeWaves(rec.fields["waves"]),
+    createdAt: numberField(rec.fields["createdAt"]) ?? Date.now(),
+    updatedAt: numberField(rec.fields["updatedAt"]) ?? Date.now(),
+    best: numberField(rec.fields["best"]) ?? 0,
+    bestPct: numberField(rec.fields["bestPct"]) ?? 0,
+    starsEarned: clampStars(numberField(rec.fields["starsEarned"]) ?? 0),
+    remixedFrom: stringField(rec.fields["remixedFrom"]) || undefined,
+    publishedRecordName: stringField(rec.fields["publishedRecordName"]) || undefined,
+    publishedVersion: numberField(rec.fields["publishedVersion"]) || undefined,
+    installedFrom: stringField(rec.fields["installedFrom"]) || undefined,
+    installedVersion: numberField(rec.fields["installedVersion"]) || undefined,
+    installedAuthorName: stringField(rec.fields["installedAuthorName"]) || undefined,
+  };
 }
 
 function recordToPublished(rec: CloudKitRecord): PublishedChallenge | null {
-  try {
-    const wavesRaw = rec.fields["waves"];
-    const waves: string[] = Array.isArray(wavesRaw)
-      ? (wavesRaw as unknown[]).filter((w): w is string => typeof w === "string")
-      : [];
-    const effectsJson = stringField(rec.fields["effects"]) ?? "{}";
-    const starsJson = stringField(rec.fields["stars"]) ?? '{"one":1,"two":2,"three":3}';
-    const effects = JSON.parse(effectsJson) as CustomChallengeEffects;
-    const stars = JSON.parse(starsJson) as CustomChallengeStars;
-    return {
-      recordName: rec.recordName,
-      name: stringField(rec.fields["name"]) ?? "Untitled",
-      authorId: stringField(rec.fields["authorId"]) ?? "",
-      authorName: stringField(rec.fields["authorName"]) ?? "Anonymous",
-      difficulty: clampDifficulty(numberField(rec.fields["difficulty"]) ?? 3),
-      seed: numberField(rec.fields["seed"]) ?? 0,
-      effects: {
-        slowDuration: effects.slowDuration ?? 5,
-        fastDuration: effects.fastDuration ?? 5,
-        shieldDuration: effects.shieldDuration ?? 10,
-        droneDuration: effects.droneDuration ?? 10,
-        dangerSize: effects.dangerSize ?? 7,
-      },
-      waves,
-      stars: {
-        one: stars.one ?? 1,
-        two: stars.two ?? 2,
-        three: stars.three ?? 3,
-      },
-      version: numberField(rec.fields["version"]) ?? 1,
-      publishedAt: numberField(rec.fields["publishedAt"]) ?? rec.createdAt ?? Date.now(),
-      updatedAt: numberField(rec.fields["updatedAt"]) ?? rec.modifiedAt ?? Date.now(),
-      status: (stringField(rec.fields["status"]) as PublishedChallenge["status"]) ?? "approved",
-      reportCount: numberField(rec.fields["reportCount"]) ?? 0,
-      upvoteCount: numberField(rec.fields["upvoteCount"]) ?? 0,
-      installCount: numberField(rec.fields["installCount"]) ?? 0,
-      playCount: numberField(rec.fields["playCount"]) ?? 0,
-      sourceCustomId: stringField(rec.fields["sourceCustomId"]) ?? "",
-    };
-  } catch {
-    return null;
-  }
+  return {
+    recordName: rec.recordName,
+    name: stringField(rec.fields["name"]) ?? "Untitled",
+    authorId: stringField(rec.fields["authorId"]) ?? "",
+    authorName: stringField(rec.fields["authorName"]) ?? "Anonymous",
+    difficulty: clampDifficulty(numberField(rec.fields["difficulty"]) ?? 3),
+    seed: numberField(rec.fields["seed"]) ?? 0,
+    effects: decodeEffects(stringField(rec.fields["effects"])),
+    waves: decodeWaves(rec.fields["waves"]),
+    stars: decodeStars(stringField(rec.fields["stars"])),
+    version: numberField(rec.fields["version"]) ?? 1,
+    publishedAt: numberField(rec.fields["publishedAt"]) ?? rec.createdAt ?? Date.now(),
+    updatedAt: numberField(rec.fields["updatedAt"]) ?? rec.modifiedAt ?? Date.now(),
+    status: (stringField(rec.fields["status"]) as PublishedChallenge["status"]) ?? "approved",
+    reportCount: numberField(rec.fields["reportCount"]) ?? 0,
+    upvoteCount: numberField(rec.fields["upvoteCount"]) ?? 0,
+    installCount: numberField(rec.fields["installCount"]) ?? 0,
+    playCount: numberField(rec.fields["playCount"]) ?? 0,
+    sourceCustomId: stringField(rec.fields["sourceCustomId"]) ?? "",
+  };
 }
 
 function recordToScore(rec: CloudKitRecord): CommunityScore | null {
@@ -719,13 +702,8 @@ function numberField(v: CloudKitField | undefined): number | null {
   return typeof v === "number" && Number.isFinite(v) ? v : null;
 }
 
-function clampDifficulty(v: number): 1 | 2 | 3 | 4 | 5 {
-  return Math.max(1, Math.min(5, Math.round(v))) as 1 | 2 | 3 | 4 | 5;
-}
-
-function clampStars(v: number): 0 | 1 | 2 | 3 {
-  return Math.max(0, Math.min(3, Math.round(v))) as 0 | 1 | 2 | 3;
-}
+// clampDifficulty / clampStars live in src/validation.ts (shared with
+// customChallenges.ts).
 
 // Re-export so callers can do an account-status check without also
 // pulling cloudKit.ts (keeps the import surface narrow).

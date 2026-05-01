@@ -537,11 +537,85 @@ game on screen is **identical to the day this branch started**.
 
 ## Appendix — baselines
 
-Captured in Phase 0 PR. To be filled in:
+Captured 2026-05-01 on `refactor/game-decomposition`.
 
-- Pre-refactor `docs/` bundle size: _TBD_
-- Pre-refactor `docs/` gzipped size: _TBD_
-- Phase 0 integration fixture seed: _TBD_
-- Phase 0 integration fixture final score: _TBD_
-- Phase 0 integration fixture state transitions: see
-  `tests/golden/integration-run.json`
+| Asset | Raw | Gzip |
+|---|---|---|
+| `index-*.js` | 387.86 kB | 110.07 kB |
+| `web-*.js` | 0.84 kB | 0.40 kB |
+| `index-*.css` | 57.73 kB | 10.75 kB |
+
+Headroom: 5% bundle-size budget per Phase ⇒ JS ≤ 407 kB, CSS ≤ 60.6 kB.
+
+Test suite at end of Phase 0: **62 tests** (target: 30+). Determinism
+fingerprints pinned via `toMatchInlineSnapshot` in
+`tests/determinism.test.ts`; both `mulberry32` implementations agree
+under every tested seed.
+
+---
+
+## Status — refactor branch progress
+
+End-of-session snapshot. **225 tests** total (started at 62).
+Coverage: **23.58% statements / 25.03% lines** across `src/`,
+up from 6.5% before the integration smoke test was added in
+session 2. Bundle: 388.81 kB JS / 110.71 kB gzip (within budget;
++1.3 kB raw / +0.4 kB gzip from prop-gather call-sites in `Game`,
+amortised by 16 fewer template strings inside the class).
+
+Integration smoke test boots `Game` in jsdom and drives three
+deterministic challenge runs (`1-1`, `2-1`, `3-3`) for ~9.6
+seconds each, capturing score / state-transitions / per-tick
+cluster count / per-tick player size / spawn order into golden
+fixtures at `tests/golden/integration-run-*.json`. Math.random
+is seeded per test so cosmetic uses (debris impulses, floater
+jitter) don't perturb the trace. Set `INTEGRATION_UPDATE=1` to
+regenerate the fixtures (with a written justification per the
+prime directive).
+
+| Phase | PR | Status | Notes |
+|---|---|---|---|
+| 0 | Harness + baselines | ✅ done | vitest, jsdom polyfills (incl. memory localStorage shim), 62 baseline tests, CI workflow, bundle baseline |
+| 0.5 | Integration smoke | ✅ done | Boots Game in jsdom, drives 3 deterministic challenge runs at 600 ticks each, golden fixtures locked. Coverage 6.5%→23.6%. |
+| 1.1 | Unify mulberry32 + FNV | ✅ done | Both `hex.ts` duplicates deleted; `cloudSync.shortHash` collapsed onto `hashSeed` |
+| 1.2 | `storage.ts` + `storageKeys.ts` | ✅ done | Every `localStorage` call routes through wrappers; 19 keys in registry |
+| 1.3 | Unify `ClusterKind` palettes | ✅ done | Three switches → `palettes.ts` data tables; snapshot-locked |
+| 1.4 | Pure scoring | ⚠️ partial | `stepMilestones` + `highestTierCrossed` extracted; fast/big bonus pool stays in Game (intertwined with timers + audio) — finishes with EffectsManager in 3.2 |
+| 1.5 | Pure spawn helpers | ⚠️ partial | `lateGameSpeedMul` + `computeWaveParams` extracted; remaining spawn helpers (`pickSpawnColumn`, `chooseWallForEndlessWave`, etc.) are tied to many `this.*` fields and move with Spawner / WaveDirector in Phase 3 |
+| 1.6 | Move `composeWaveLine` | ✅ done | Now lives next to `parseWaveLine`; round-trip property test added |
+| 1.7 | Promote `clamp*` helpers | ✅ done | `validation.ts` shared by `customChallenges` + `cloudSync` |
+| 2 | Screen extraction | ✅ done | 16 screens extracted to `src/ui/screens/*` (BlocksGuide, UnlockShop, ChallengeIntro, ChallengeComplete, GameOver, LeaderboardSheet, ReportSheet, SingleChallenge, communityBody, installedChallengesBody, challengeSelect, editorHome, settingsDialog, waveDialog, customWaveDialog, editorEdit). Each `Game.render*()` is a thin prop-gathering wrapper. Click handlers + post-render binding (canvas painting, drag handles, scroll restore, picker positioning) stay on Game. The editor wave/custom-wave dialogs are pinned by 6 round-trip tests in `tests/integration/editorDialogs.test.ts` so future state changes can't quietly regress the DSL composition. |
+| 3 | Collaborator split | ⛔ skipped | Renderer / EffectsManager / Spawner / CollisionRouter / WaveDirector / ChallengeRunner; high-risk, deferred |
+| 4.1 | Roster validator → tests | ✅ done | Dev-only `if (import.meta.env?.DEV)` block in `challenges.ts` is now `tests/challenges-defs.test.ts`; CI catches roster regressions |
+| 4.2 | `EDITOR_TEMP_UNLOCKED_ON_IOS` → env | ✅ done | Now `VITE_EDITOR_UNLOCKED` (default "1"); flip to "0" for ship build |
+| 4.3 | CloudKit field-mapping consolidation | ✅ done | Three shared decoders (`decodeEffects` / `decodeStars` / `decodeWaves`); −50 LOC |
+| 4.4 | Flatten `validateCustomChallenge` | ✅ done | Splits into `validateName` / `validateWaveCount` / `validateWaveLines` / `validateOneWaveLine`; table-driven tests |
+| 4.5 | Coverage ratchet | ⛔ skipped | No coverage gate set yet; ratchet after merge |
+| 5 | Type tightening | ⛔ skipped | Optional per the plan |
+
+Anything marked ⛔ is explicitly **not started** — game.ts still
+contains the relevant code. Phase 3 is the remaining multi-week
+piece; it gets its own branch built from merged main. Phase 4.5 is
+one commit and can land any time.
+
+`game.ts` shrunk **9422 → 8215 LOC** across this branch (−1207 LOC,
+−13%). The reductions came from screen extraction (Phase 2),
+storage / palette / scoring / spawn / wave-DSL helper extraction
+(Phase 1), and validator flattening (Phase 4). Game still owns the
+state machine, the run loop, the editor's mutator paths, and all
+DOM event routing — those are Phase 3.
+
+### What's safer to change after this branch
+
+- Adding new persistence: declare the key in `storageKeys.ts`, use
+  `loadJson` / `saveJson`. No chance of typos against legacy strings.
+- Adding new cluster kinds: add the palette entries to `palettes.ts`
+  and the snapshot tests catch any colour drift.
+- Re-balancing star thresholds: the per-challenge dev-only validator
+  is now a CI gate, so a shipped roster can't have a "wave does
+  nothing" bug.
+- Touching the wave DSL: round-trip + per-line parser tests will
+  flag any composer/parser asymmetry.
+- Touching the player connectivity logic (the bug we hunted earlier):
+  Player auto-runs `dropOrphans` after every cell mutation, so a
+  future caller can't forget to check.

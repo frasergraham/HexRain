@@ -478,3 +478,74 @@ export function validateChallenge(def: ChallengeDefLike): string[] {
 
   return errors;
 }
+
+// Inverse of parseWaveLine — emits the DSL string for a ParsedWave.
+// Used by the editor's "Advanced" controls so that flipping a single
+// field (count, dur, walls, etc.) round-trips through the parser. The
+// editor's cluster-mix controls (`pct=`) live in their own state so
+// this composer omits the pct token to keep the working line clean.
+export function composeWaveLine(w: ParsedWave): string {
+  const tokens: string[] = [];
+  if (w.sizeMin === w.sizeMax) tokens.push(`size=${w.sizeMin}`);
+  else tokens.push(`size=${w.sizeMin}-${w.sizeMax}`);
+  tokens.push(`speed=${w.baseSpeedMul}`);
+  tokens.push(`rate=${w.spawnInterval}`);
+  if (Math.abs(w.slotInterval - w.spawnInterval) > 0.001) {
+    tokens.push(`slotRate=${w.slotInterval}`);
+  }
+  if (w.countCap !== null) tokens.push(`count=${w.countCap}`);
+  if (w.durOverride !== null) tokens.push(`dur=${w.durOverride}`);
+  if (w.walls !== "none") {
+    tokens.push(`walls=${w.walls}`);
+    if (w.walls === "zigzag") {
+      tokens.push(`wallAmp=${w.wallAmp}`);
+      tokens.push(`wallPeriod=${w.wallPeriod}`);
+    }
+  }
+  if (w.safeCol === "none") tokens.push("safeCol=none");
+  else if (typeof w.safeCol === "number") tokens.push(`safeCol=${w.safeCol}`);
+  if (w.origin !== "top") tokens.push(`origin=${w.origin}`);
+  if (w.defaultDir !== 0) tokens.push(`dir=${w.defaultDir}`);
+  if (w.defaultDirRandom) tokens.push(`dirRandom=1`);
+  for (const s of w.slots) {
+    if (s === null) tokens.push("000");
+    else tokens.push(`${slotKindToPrefix(s.kind)}${s.size}${s.col}${s.angleIdx}`);
+  }
+  return tokens.join(", ");
+}
+
+// Per-line health check used by the editor's row-level warning badge.
+// Catches parse errors and the "wave does nothing" case (no count, no
+// slots, no dur+rate). Same rule as `validateChallenge` but per-line.
+export function checkWaveLine(line: string): { ok: true } | { ok: false; reason: string } {
+  let parsed: ParsedWave;
+  try {
+    parsed = parseWaveLine(line);
+  } catch (e) {
+    return { ok: false, reason: `Parse error: ${(e as Error).message}` };
+  }
+  const hasCount = parsed.countCap !== null && parsed.countCap > 0;
+  const hasSlots = parsed.slots.length > 0;
+  const probDisabledByZeroCount = parsed.countCap === 0;
+  const hasDur =
+    parsed.durOverride !== null &&
+    parsed.durOverride > 0 &&
+    parsed.spawnInterval > 0 &&
+    !probDisabledByZeroCount;
+  if (!hasCount && !hasSlots && !hasDur) {
+    return { ok: false, reason: "Wave does nothing — set a count, a duration, or a slot pattern." };
+  }
+  return { ok: true };
+}
+
+// True for slot-only waves (count=0 or null, plus at least one slot
+// token). Used by the editor to decide which dialog to open: tile-grid
+// for slot-only, regular preset dialog for everything else.
+export function isCustomShapedWave(line: string): boolean {
+  try {
+    const w = parseWaveLine(line);
+    return (w.countCap === 0 || w.countCap === null) && w.slots.length > 0;
+  } catch {
+    return false;
+  }
+}
