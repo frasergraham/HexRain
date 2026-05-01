@@ -5767,6 +5767,9 @@ export class Game {
     const playerSize = this.player.size();
     const dangerSize = this.dangerSize();
     this.player.inDanger = playerSize >= dangerSize;
+    // Critical = a danger hit is queued (next blue blow ends the run). The
+    // player draw uses this to ramp the red glow up/down.
+    this.player.criticalDanger = this.player.inDanger && this.comboHits > 0;
 
     // Survivor: was in danger and clawed back to a single hex.
     if (playerSize >= dangerSize) this.wasInDangerThisRun = true;
@@ -5828,6 +5831,10 @@ export class Game {
     // Process queued contacts (collected during collisionStart).
     if (this.pendingContacts.length > 0) {
       this.handlePendingContacts();
+      // Contacts can flip comboHits — refresh the critical flag now so the
+      // glow snaps to the new state on the very next render rather than
+      // waiting one full tick.
+      this.player.criticalDanger = this.player.inDanger && this.comboHits > 0;
     }
 
     // Score on pass + cleanup. Bodies are despawned shortly after they exit
@@ -7022,6 +7029,9 @@ export class Game {
 
     const sizeBefore = this.player.size();
     this.player.addCell(s.targetCell);
+    // Sticks can land in unfortunate orders that leave a hole inside the
+    // silhouette. Compact closes the gap so the blob always reads as solid.
+    this.player.compact();
 
     // First-ever 1→2 growth (persisted across launches) teaches the
     // rotate gesture.
@@ -7140,6 +7150,10 @@ export class Game {
           kind: "normal",
         });
       }
+
+      // Heals can leave a hole where the removed cells used to bridge two
+      // wings of the blob. Compact pulls the outer cells inward to close it.
+      this.player.compact();
     }
 
     // The sticky cluster itself shatters into debris.
