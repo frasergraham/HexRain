@@ -7,6 +7,7 @@
 import { parseWaveLine, type ChallengeDefLike } from "./waveDsl";
 import type { ChallengeDef } from "./challenges";
 import { syncProgressUp } from "./cloudSync";
+import { clamp, clampDifficulty, clampStars, numOr } from "./validation";
 
 const STORAGE_KEY = "hexrain.customChallenges.v1";
 
@@ -169,21 +170,8 @@ function fillDefaults(c: Partial<CustomChallenge>): CustomChallenge {
   };
 }
 
-function numOr(v: unknown, fallback: number): number {
-  return typeof v === "number" && Number.isFinite(v) ? v : fallback;
-}
-
-function clamp(v: number, lo: number, hi: number): number {
-  return Math.max(lo, Math.min(hi, v));
-}
-
-function clampDifficulty(v: number): 1 | 2 | 3 | 4 | 5 {
-  return clamp(Math.round(v), 1, 5) as 1 | 2 | 3 | 4 | 5;
-}
-
-function clampStars(v: number): 0 | 1 | 2 | 3 {
-  return clamp(Math.round(v), 0, 3) as 0 | 1 | 2 | 3;
-}
+// Numeric helpers (clamp, numOr, clampDifficulty, clampStars) live in
+// src/validation.ts and are shared with cloudSync's record marshalling.
 
 export function loadCustomChallenges(): CustomChallengeStore {
   try {

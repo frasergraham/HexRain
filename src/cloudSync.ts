@@ -53,6 +53,7 @@ import {
 } from "./customChallenges";
 import { checkName, type ModerationResult } from "./moderation";
 import { hashSeed } from "./rng";
+import { clampDifficulty, clampStars } from "./validation";
 
 // ---------- Identity ------------------------------------------------------
 
@@ -716,13 +717,8 @@ function numberField(v: CloudKitField | undefined): number | null {
   return typeof v === "number" && Number.isFinite(v) ? v : null;
 }
 
-function clampDifficulty(v: number): 1 | 2 | 3 | 4 | 5 {
-  return Math.max(1, Math.min(5, Math.round(v))) as 1 | 2 | 3 | 4 | 5;
-}
-
-function clampStars(v: number): 0 | 1 | 2 | 3 {
-  return Math.max(0, Math.min(3, Math.round(v))) as 0 | 1 | 2 | 3;
-}
+// clampDifficulty / clampStars live in src/validation.ts (shared with
+// customChallenges.ts).
 
 // Re-export so callers can do an account-status check without also
 // pulling cloudKit.ts (keeps the import surface narrow).
