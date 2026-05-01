@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseWaveLine, slotKindToPrefix, validateChallenge, ANGLE_TABLE } from "../src/waveDsl";
+import { composeWaveLine, parseWaveLine, slotKindToPrefix, validateChallenge, ANGLE_TABLE } from "../src/waveDsl";
 import { CHALLENGES } from "../src/challenges";
 
 describe("parseWaveLine — basic key=value tokens", () => {
@@ -103,6 +103,41 @@ describe("validateChallenge — every shipped challenge parses + does something"
       const errs = validateChallenge(def);
       expect(errs, `challenge ${def.id} (${def.name})`).toEqual([]);
     }
+  });
+});
+
+describe("composeWaveLine round-trip", () => {
+  // Drawn from across the shipped roster — covers basic mixes,
+  // slot scripts, walls + amplitude, sized, and dur-bounded waves.
+  const fixtures = [
+    "size=1, rate=0.25, speed=1.05, count=14",
+    "size=2-3, rate=0.7, speed=1.2, count=10, pct=normal:65,coin:35",
+    "size=3, rate=0.8, speed=1.15, count=9, walls=pinch, pct=normal:80,coin:20",
+    "size=3, rate=0.65, speed=1.4, count=11, walls=zigzag, wallAmp=0.22, pct=normal:50,sticky:30,fast:20",
+    "size=3, rate=0.5, speed=1.5, count=12, walls=narrow",
+    "count=0, slotRate=0.5, speed=1.2, 130,230,330,430,530,000",
+    "count=0, slotRate=0.45, speed=1.4, walls=zigzag, S130,C237,T148,B330,000",
+    "size=2-4, rate=0.55, speed=1.6, count=14, dur=10, walls=pinch",
+  ];
+
+  it.each(fixtures)("parse(compose(parse(%s))) === parse(input)", (line) => {
+    const parsed = parseWaveLine(line);
+    const composed = composeWaveLine(parsed);
+    const reparsed = parseWaveLine(composed);
+    // Compare the structurally important fields (composeWaveLine
+    // intentionally drops `pct=` so the editor's separate mix UI
+    // owns weights — round-trip excludes weights).
+    expect(reparsed.sizeMin).toBe(parsed.sizeMin);
+    expect(reparsed.sizeMax).toBe(parsed.sizeMax);
+    expect(reparsed.spawnInterval).toBeCloseTo(parsed.spawnInterval);
+    expect(reparsed.slotInterval).toBeCloseTo(parsed.slotInterval);
+    expect(reparsed.baseSpeedMul).toBeCloseTo(parsed.baseSpeedMul);
+    expect(reparsed.countCap).toBe(parsed.countCap);
+    expect(reparsed.durOverride).toBe(parsed.durOverride);
+    expect(reparsed.walls).toBe(parsed.walls);
+    expect(reparsed.safeCol).toBe(parsed.safeCol);
+    expect(reparsed.origin).toBe(parsed.origin);
+    expect(reparsed.slots).toEqual(parsed.slots);
   });
 });
 

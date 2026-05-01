@@ -478,3 +478,38 @@ export function validateChallenge(def: ChallengeDefLike): string[] {
 
   return errors;
 }
+
+// Inverse of parseWaveLine — emits the DSL string for a ParsedWave.
+// Used by the editor's "Advanced" controls so that flipping a single
+// field (count, dur, walls, etc.) round-trips through the parser. The
+// editor's cluster-mix controls (`pct=`) live in their own state so
+// this composer omits the pct token to keep the working line clean.
+export function composeWaveLine(w: ParsedWave): string {
+  const tokens: string[] = [];
+  if (w.sizeMin === w.sizeMax) tokens.push(`size=${w.sizeMin}`);
+  else tokens.push(`size=${w.sizeMin}-${w.sizeMax}`);
+  tokens.push(`speed=${w.baseSpeedMul}`);
+  tokens.push(`rate=${w.spawnInterval}`);
+  if (Math.abs(w.slotInterval - w.spawnInterval) > 0.001) {
+    tokens.push(`slotRate=${w.slotInterval}`);
+  }
+  if (w.countCap !== null) tokens.push(`count=${w.countCap}`);
+  if (w.durOverride !== null) tokens.push(`dur=${w.durOverride}`);
+  if (w.walls !== "none") {
+    tokens.push(`walls=${w.walls}`);
+    if (w.walls === "zigzag") {
+      tokens.push(`wallAmp=${w.wallAmp}`);
+      tokens.push(`wallPeriod=${w.wallPeriod}`);
+    }
+  }
+  if (w.safeCol === "none") tokens.push("safeCol=none");
+  else if (typeof w.safeCol === "number") tokens.push(`safeCol=${w.safeCol}`);
+  if (w.origin !== "top") tokens.push(`origin=${w.origin}`);
+  if (w.defaultDir !== 0) tokens.push(`dir=${w.defaultDir}`);
+  if (w.defaultDirRandom) tokens.push(`dirRandom=1`);
+  for (const s of w.slots) {
+    if (s === null) tokens.push("000");
+    else tokens.push(`${slotKindToPrefix(s.kind)}${s.size}${s.col}${s.angleIdx}`);
+  }
+  return tokens.join(", ");
+}

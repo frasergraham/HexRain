@@ -36,7 +36,7 @@ import {
 } from "./audio";
 import { Player } from "./player";
 import type { Axial, ClusterKind, Difficulty, GameMode, GameState, InputAction, Shape, WallKind } from "./types";
-import { ANGLE_TABLE, parseWaveLine, type ParsedWave } from "./waveDsl";
+import { ANGLE_TABLE, composeWaveLine, parseWaveLine, type ParsedWave } from "./waveDsl";
 import {
   CHALLENGES,
   awardStars,
@@ -9359,40 +9359,8 @@ function helpTipHtml(key: string, override?: string): string {
   </span>`;
 }
 
-// Compose a DSL line from a ParsedWave. Inverse of parseWaveLine for
-// the editor — used when an always-visible control (count, dur, walls)
-// mutates the working line. Slots and weights are passed through; the
-// editor's mix lives in editorDialogPctValues and is applied at OK time
-// instead, so we omit `pct=` here to keep the working line clean.
-function composeWaveLine(w: ParsedWave): string {
-  const tokens: string[] = [];
-  if (w.sizeMin === w.sizeMax) tokens.push(`size=${w.sizeMin}`);
-  else tokens.push(`size=${w.sizeMin}-${w.sizeMax}`);
-  tokens.push(`speed=${w.baseSpeedMul}`);
-  tokens.push(`rate=${w.spawnInterval}`);
-  if (Math.abs(w.slotInterval - w.spawnInterval) > 0.001) {
-    tokens.push(`slotRate=${w.slotInterval}`);
-  }
-  if (w.countCap !== null) tokens.push(`count=${w.countCap}`);
-  if (w.durOverride !== null) tokens.push(`dur=${w.durOverride}`);
-  if (w.walls !== "none") {
-    tokens.push(`walls=${w.walls}`);
-    if (w.walls === "zigzag") {
-      tokens.push(`wallAmp=${w.wallAmp}`);
-      tokens.push(`wallPeriod=${w.wallPeriod}`);
-    }
-  }
-  if (w.safeCol === "none") tokens.push("safeCol=none");
-  else if (typeof w.safeCol === "number") tokens.push(`safeCol=${w.safeCol}`);
-  if (w.origin !== "top") tokens.push(`origin=${w.origin}`);
-  if (w.defaultDir !== 0) tokens.push(`dir=${w.defaultDir}`);
-  if (w.defaultDirRandom) tokens.push(`dirRandom=1`);
-  for (const s of w.slots) {
-    if (s === null) tokens.push("000");
-    else tokens.push(`${slotKindToPrefix(s.kind)}${s.size}${s.col}${s.angleIdx}`);
-  }
-  return tokens.join(", ");
-}
+// composeWaveLine moved to waveDsl.ts (Phase 1.6) so it lives next to
+// its inverse parseWaveLine.
 
 // Hard cap on rows in the Custom Wave editor. Each row maps to one slot
 // token in the DSL output (skipped rows emit "000").
