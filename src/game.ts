@@ -99,6 +99,7 @@ import { shareChallenge } from "./share";
 import { hashSeed, mulberry32, type Random } from "./rng";
 import { loadBool, loadJson, loadString, removeKey, saveBool, saveJson, saveString } from "./storage";
 import { STORAGE_KEYS } from "./storageKeys";
+import { computeWaveParams, lateGameSpeedMul } from "./spawn";
 
 // Build-time feature flag: while the IAP unlock flow is being verified
 // on TestFlight, set VITE_EDITOR_UNLOCKED=1 in .env.local (or any vite
@@ -320,9 +321,8 @@ const MAX_FALL_SPEED = 5.5;
 const CHALLENGE_BASE_FALL_SPEED = 12;
 const CHALLENGE_MAX_FALL_SPEED = 60;
 
-const SPAWN_INTERVAL_START = 1.6; // seconds
-const SPAWN_INTERVAL_MIN = 0.7;
-const SPAWN_INTERVAL_RAMP = 0.03;
+// SPAWN_INTERVAL_START / _MIN / _RAMP moved to src/spawn.ts in
+// Phase 1.5 — wave-cadence math is pure and lives there now.
 
 const LOSE_COMBO = 2;
 const STICK_INVULN_MS = 180;
@@ -475,8 +475,7 @@ const NEBULA_SCROLL_SPEED = 4; // px/sec downward drift of the nebula
 
 const HINT_TIMESCALE = 0.5; // game runs at this rate while a hint cluster is on screen
 const ROTATE_TUTORIAL_TIMESCALE = 0.25; // even slower while teaching the rotate gesture
-const LATE_RAMP_FLOOR_SCORE = 500; // late-game speed-up kicks in at this score
-const LATE_RAMP_PER_100 = 0.1; // base rate gains this much per 100 points past the floor
+// LATE_RAMP_FLOOR_SCORE / LATE_RAMP_PER_100 moved to src/spawn.ts.
 const ROTATE_SLIDE_SENS = 0.02; // radians of player rotation per pixel of horizontal drag
 
 export class Game {
@@ -8237,24 +8236,7 @@ export class Game {
   // ----- Wave / difficulty system -----
 
   private waveParams() {
-    const s = this.score;
-    return {
-      // Wave grows from short to long with score.
-      waveDuration: Math.min(8, 2.2 + s * 0.06),
-      // Calm shrinks but never below 2.5s, so player always gets a breather.
-      calmDuration: Math.max(2.5, 7 - s * 0.07),
-      // Wave spawn cadence: faster than calm, scales with score.
-      waveSpawnInterval: Math.max(0.32, 0.55 - s * 0.005),
-      // Calm spawn cadence: existing curve, with the difficulty's
-      // starting interval scaling — easy waits longer, hard kicks off
-      // faster. The min floor still caps how tight it can get.
-      calmSpawnInterval: Math.max(
-        SPAWN_INTERVAL_MIN,
-        SPAWN_INTERVAL_START * this.cfg().spawnIntervalMul - s * SPAWN_INTERVAL_RAMP,
-      ),
-      // Wave fall speed multiplier on top of base.
-      waveSpeedMul: Math.min(2.5, 1.5 + s * 0.015),
-    };
+    return computeWaveParams(this.score, this.cfg().spawnIntervalMul);
   }
 
   private currentSpawnInterval(): number {
@@ -8282,14 +8264,10 @@ export class Game {
     return base;
   }
 
-  // Late-game permanent speed-up: every 100 points past 500 raises the
-  // game's base rate by 10%, so 600 → 1.1×, 1000 → 1.5×, 1500 → 2.0×.
-  // Slow / fast / hint / tutorial modifiers all multiply on top, so a
-  // 1.0× slow at score 1000 is 0.75× wall-clock and a 1.25× fast is
-  // 1.875×. Capped at 1.8× so the game stays playable at extreme scores.
+  // Score-driven cadence math lives in src/spawn.ts (Phase 1.5);
+  // this is a thin forwarder so call sites stay short.
   private lateGameSpeedMul(): number {
-    const raw = 1 + Math.max(0, (this.score - LATE_RAMP_FLOOR_SCORE) / 100) * LATE_RAMP_PER_100;
-    return Math.min(1.8, raw);
+    return lateGameSpeedMul(this.score);
   }
 
   private advanceWavePhase(dt: number): void {
