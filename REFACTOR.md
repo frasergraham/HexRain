@@ -551,3 +551,50 @@ Test suite at end of Phase 0: **62 tests** (target: 30+). Determinism
 fingerprints pinned via `toMatchInlineSnapshot` in
 `tests/determinism.test.ts`; both `mulberry32` implementations agree
 under every tested seed.
+
+---
+
+## Status — refactor branch progress
+
+End-of-session snapshot. **177 tests** total (started at 62).
+Bundle: 387.53 kB JS / 110.27 kB gzip (within budget; net change
+under 100 bytes raw, +200 bytes gzip from compression noise).
+
+| Phase | PR | Status | Notes |
+|---|---|---|---|
+| 0 | Harness + baselines | ✅ done | vitest, jsdom polyfills (incl. memory localStorage shim), 62 baseline tests, CI workflow, bundle baseline |
+| 1.1 | Unify mulberry32 + FNV | ✅ done | Both `hex.ts` duplicates deleted; `cloudSync.shortHash` collapsed onto `hashSeed` |
+| 1.2 | `storage.ts` + `storageKeys.ts` | ✅ done | Every `localStorage` call routes through wrappers; 19 keys in registry |
+| 1.3 | Unify `ClusterKind` palettes | ✅ done | Three switches → `palettes.ts` data tables; snapshot-locked |
+| 1.4 | Pure scoring | ⚠️ partial | `stepMilestones` + `highestTierCrossed` extracted; fast/big bonus pool stays in Game (intertwined with timers + audio) — finishes with EffectsManager in 3.2 |
+| 1.5 | Pure spawn helpers | ⚠️ partial | `lateGameSpeedMul` + `computeWaveParams` extracted; remaining spawn helpers (`pickSpawnColumn`, `chooseWallForEndlessWave`, etc.) are tied to many `this.*` fields and move with Spawner / WaveDirector in Phase 3 |
+| 1.6 | Move `composeWaveLine` | ✅ done | Now lives next to `parseWaveLine`; round-trip property test added |
+| 1.7 | Promote `clamp*` helpers | ✅ done | `validation.ts` shared by `customChallenges` + `cloudSync` |
+| 2 | Screen extraction | ⛔ skipped | OverlayController + 13 screens; ~10 days of work, deferred |
+| 3 | Collaborator split | ⛔ skipped | Renderer / EffectsManager / Spawner / CollisionRouter / WaveDirector / ChallengeRunner; high-risk, deferred |
+| 4.1 | Roster validator → tests | ✅ done | Dev-only `if (import.meta.env?.DEV)` block in `challenges.ts` is now `tests/challenges-defs.test.ts`; CI catches roster regressions |
+| 4.2 | `EDITOR_TEMP_UNLOCKED_ON_IOS` → env | ✅ done | Now `VITE_EDITOR_UNLOCKED` (default "1"); flip to "0" for ship build |
+| 4.3 | CloudKit field-mapping consolidation | ✅ done | Three shared decoders (`decodeEffects` / `decodeStars` / `decodeWaves`); −50 LOC |
+| 4.4 | Flatten `validateCustomChallenge` | ✅ done | Splits into `validateName` / `validateWaveCount` / `validateWaveLines` / `validateOneWaveLine`; table-driven tests |
+| 4.5 | Coverage ratchet | ⛔ skipped | No coverage gate set yet; ratchet after merge |
+| 5 | Type tightening | ⛔ skipped | Optional per the plan |
+
+Anything marked ⛔ is explicitly **not started** — game.ts still
+contains the relevant code. Phases 2 and 3 are the multi-week pieces;
+they need a fresh branch each and per-PR review. Phase 4.5 is one
+commit and can land any time.
+
+### What's safer to change after this branch
+
+- Adding new persistence: declare the key in `storageKeys.ts`, use
+  `loadJson` / `saveJson`. No chance of typos against legacy strings.
+- Adding new cluster kinds: add the palette entries to `palettes.ts`
+  and the snapshot tests catch any colour drift.
+- Re-balancing star thresholds: the per-challenge dev-only validator
+  is now a CI gate, so a shipped roster can't have a "wave does
+  nothing" bug.
+- Touching the wave DSL: round-trip + per-line parser tests will
+  flag any composer/parser asymmetry.
+- Touching the player connectivity logic (the bug we hunted earlier):
+  Player auto-runs `dropOrphans` after every cell mutation, so a
+  future caller can't forget to check.
