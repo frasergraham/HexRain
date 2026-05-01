@@ -16,7 +16,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
 const configPath = path.join(repoRoot, "ios/App/App/capacitor.config.json");
 
-const LOCAL_PLUGINS = ["GameCenterPlugin", "StoreKitPlugin"];
+const LOCAL_PLUGINS = ["GameCenterPlugin", "StoreKitPlugin", "CloudKitPlugin"];
 
 const cfg = JSON.parse(fs.readFileSync(configPath, "utf8"));
 const existing = Array.isArray(cfg.packageClassList) ? cfg.packageClassList : [];

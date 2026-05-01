@@ -6,6 +6,7 @@
 
 import { parseWaveLine, type ChallengeDefLike } from "./waveDsl";
 import type { ChallengeDef } from "./challenges";
+import { syncProgressUp } from "./cloudSync";
 
 const STORAGE_KEY = "hexrain.customChallenges.v1";
 
@@ -47,6 +48,33 @@ export interface CustomChallenge {
    *  list as small "Remixed from: …" text. Undefined for from-scratch
    *  challenges. */
   remixedFrom?: string;
+
+  // ----- Community / publish fields ------------------------------------
+  // These are only populated on iOS once a challenge has been published
+  // to the public CloudKit DB, or installed from someone else's publish.
+  // They are additive; the editor and engine ignore unset fields, so
+  // existing local challenges load and play unchanged.
+
+  /** Set on the author's local copy after a successful publish. Acts as
+   *  the key for future update / unpublish operations against the
+   *  PublishedChallenge record in the public CloudKit DB. */
+  publishedRecordName?: string;
+  /** Last `version` value sent to the public DB for this challenge.
+   *  Bumped on every successful re-publish so subscribers can detect
+   *  outdated installs. */
+  publishedVersion?: number;
+  /** Set on a player's local copy when they install someone else's
+   *  PublishedChallenge. Stores the source record name so the
+   *  background subscription can patch this record in place when the
+   *  author re-publishes. Mutually exclusive with publishedRecordName
+   *  in normal use. */
+  installedFrom?: string;
+  /** The `version` of the PublishedChallenge record this local copy
+   *  was last synced from. */
+  installedVersion?: number;
+  /** Display name of the original author, captured at install time so
+   *  the community card can credit them without an extra fetch. */
+  installedAuthorName?: string;
 }
 
 export interface CustomChallengeStore {
@@ -123,6 +151,21 @@ function fillDefaults(c: Partial<CustomChallenge>): CustomChallenge {
     remixedFrom: typeof c.remixedFrom === "string" && c.remixedFrom.length > 0
       ? c.remixedFrom
       : undefined,
+    publishedRecordName: typeof c.publishedRecordName === "string" && c.publishedRecordName.length > 0
+      ? c.publishedRecordName
+      : undefined,
+    publishedVersion: typeof c.publishedVersion === "number" && Number.isFinite(c.publishedVersion)
+      ? Math.max(1, Math.round(c.publishedVersion))
+      : undefined,
+    installedFrom: typeof c.installedFrom === "string" && c.installedFrom.length > 0
+      ? c.installedFrom
+      : undefined,
+    installedVersion: typeof c.installedVersion === "number" && Number.isFinite(c.installedVersion)
+      ? Math.max(1, Math.round(c.installedVersion))
+      : undefined,
+    installedAuthorName: typeof c.installedAuthorName === "string" && c.installedAuthorName.length > 0
+      ? c.installedAuthorName
+      : undefined,
   };
 }
 
@@ -165,6 +208,9 @@ function saveStore(store: CustomChallengeStore): void {
   } catch {
     // ignore quota / private mode
   }
+  // Push the updated custom-challenge set to the user's private CloudKit
+  // DB (no-op on web / no iCloud). syncProgressUp is debounced internally.
+  syncProgressUp();
 }
 
 export function listCustomChallenges(): CustomChallenge[] {
@@ -234,6 +280,15 @@ export function upsertCustomChallenge(c: CustomChallenge): CustomChallenge {
     // Attribution is set at creation (remix flow) and never overwritten
     // by subsequent edits — it's a permanent label, like "based on" credit.
     remixedFrom: prev?.remixedFrom ?? c.remixedFrom,
+    // Publish/install state belongs to the existing record when one is
+    // present. Caller code (cloudSync.ts) writes these explicitly via
+    // bumpPublishedVersion / setInstalledMeta — never via this generic
+    // upsert path — so we always keep what was already on disk.
+    publishedRecordName: prev?.publishedRecordName ?? c.publishedRecordName,
+    publishedVersion: prev?.publishedVersion ?? c.publishedVersion,
+    installedFrom: prev?.installedFrom ?? c.installedFrom,
+    installedVersion: prev?.installedVersion ?? c.installedVersion,
+    installedAuthorName: prev?.installedAuthorName ?? c.installedAuthorName,
   });
   if (idx >= 0) store.challenges[idx] = merged;
   else store.challenges.push(merged);
@@ -306,6 +361,89 @@ export function validateCustomChallenge(c: CustomChallenge): string[] {
     }
   }
   return errors;
+}
+
+// Stamp the publish state on the author's local record after a publish
+// or update succeeds. Bumps updatedAt so the editor list reflects the
+// publish timestamp. Idempotent — no-op when the challenge no longer
+// exists locally (e.g. user deleted while a slow publish was in flight).
+export function setPublishedMeta(
+  id: string,
+  publishedRecordName: string,
+  publishedVersion: number,
+): void {
+  const store = loadCustomChallenges();
+  const idx = store.challenges.findIndex((c) => c.id === id);
+  if (idx < 0) return;
+  const prev = store.challenges[idx]!;
+  store.challenges[idx] = {
+    ...prev,
+    publishedRecordName,
+    publishedVersion: Math.max(1, Math.round(publishedVersion)),
+    updatedAt: Date.now(),
+  };
+  saveStore(store);
+}
+
+// Strip publish state on a successful unpublish.
+export function clearPublishedMeta(id: string): void {
+  const store = loadCustomChallenges();
+  const idx = store.challenges.findIndex((c) => c.id === id);
+  if (idx < 0) return;
+  const prev = store.challenges[idx]!;
+  if (!prev.publishedRecordName && !prev.publishedVersion) return;
+  store.challenges[idx] = {
+    ...prev,
+    publishedRecordName: undefined,
+    publishedVersion: undefined,
+    updatedAt: Date.now(),
+  };
+  saveStore(store);
+}
+
+// Refresh an installed challenge's authored content (waves, effects,
+// difficulty, name, stars) from the latest published version. Run-stat
+// fields (best, bestPct, starsEarned) and the local id are preserved
+// so the player's progress carries over the silent auto-update.
+export function applyInstalledUpdate(
+  installedFrom: string,
+  patch: {
+    name: string;
+    difficulty: 1 | 2 | 3 | 4 | 5;
+    seed: number;
+    effects: CustomChallengeEffects;
+    waves: string[];
+    stars: CustomChallengeStars;
+    installedVersion: number;
+    installedAuthorName?: string;
+  },
+): void {
+  const store = loadCustomChallenges();
+  const idx = store.challenges.findIndex((c) => c.installedFrom === installedFrom);
+  if (idx < 0) return;
+  const prev = store.challenges[idx]!;
+  store.challenges[idx] = {
+    ...prev,
+    name: patch.name.slice(0, MAX_CUSTOM_NAME_LEN),
+    difficulty: patch.difficulty,
+    seed: patch.seed >>> 0,
+    effects: { ...patch.effects },
+    waves: patch.waves.slice(0, MAX_WAVES_PER_CUSTOM),
+    stars: { ...patch.stars },
+    installedVersion: Math.max(1, Math.round(patch.installedVersion)),
+    installedAuthorName: patch.installedAuthorName ?? prev.installedAuthorName,
+    updatedAt: Date.now(),
+  };
+  saveStore(store);
+}
+
+// Find a local custom challenge by either publish-side (author copy)
+// or install-side (subscriber copy) record name. Returns undefined when
+// neither matches — useful when reconciling remote state on launch.
+export function findCustomByPublishedRecord(recordName: string): CustomChallenge | undefined {
+  return loadCustomChallenges().challenges.find(
+    (c) => c.publishedRecordName === recordName || c.installedFrom === recordName,
+  );
 }
 
 // Convert a custom challenge into the synthetic ChallengeDef the engine

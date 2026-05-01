@@ -22,14 +22,14 @@ public class GameCenterPlugin: CAPPlugin, CAPBridgedPlugin {
         let local = GKLocalPlayer.local
 
         if local.isAuthenticated {
-            call.resolve(["authenticated": true])
+            call.resolve(self.identityPayload(local))
             return
         }
 
         // Game Center will replay the handler whenever auth state changes,
         // so we have to be careful to only resolve the *current* call once.
         if didTryAuth {
-            call.resolve(["authenticated": local.isAuthenticated])
+            call.resolve(self.identityPayload(local))
             return
         }
         didTryAuth = true
@@ -50,8 +50,17 @@ public class GameCenterPlugin: CAPPlugin, CAPBridgedPlugin {
                 return
             }
 
-            call.resolve(["authenticated": local.isAuthenticated])
+            call.resolve(self.identityPayload(local))
         }
+    }
+
+    private func identityPayload(_ player: GKLocalPlayer) -> [String: Any] {
+        var out: [String: Any] = ["authenticated": player.isAuthenticated]
+        if player.isAuthenticated {
+            out["displayName"] = player.displayName
+            out["alias"] = player.alias
+        }
+        return out
     }
 
     @objc func submitScore(_ call: CAPPluginCall) {

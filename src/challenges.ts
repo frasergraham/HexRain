@@ -7,6 +7,7 @@
 
 import type { ClusterKind } from "./types";
 import { parseWaveLine, validateChallenge, type ChallengeDefLike } from "./waveDsl";
+import { syncProgressUp } from "./cloudSync";
 
 export interface ChallengeDef extends ChallengeDefLike {
   // ChallengeDefLike already includes id, name, difficulty, block, index, effects, waves.
@@ -719,6 +720,9 @@ function save(p: ChallengeProgress): void {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(p));
   } catch { /* ignore quota / private mode */ }
+  // Mirror to CloudKit private DB if available. Debounced inside
+  // syncProgressUp so a flurry of saves only triggers one round-trip.
+  syncProgressUp();
 }
 
 export function saveChallengeBest(id: string, score: number, pct = 0): ChallengeProgress {

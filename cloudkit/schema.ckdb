@@ -1,0 +1,135 @@
+DEFINE SCHEMA
+
+    RECORD TYPE CustomChallenge (
+        "___createTime"     TIMESTAMP,
+        "___createdBy"      REFERENCE,
+        "___etag"           STRING,
+        "___modTime"        TIMESTAMP,
+        "___modifiedBy"     REFERENCE,
+        "___recordID"       REFERENCE QUERYABLE,
+        best                DOUBLE QUERYABLE SORTABLE,
+        bestPct             DOUBLE QUERYABLE SORTABLE,
+        createdAt           DOUBLE QUERYABLE SORTABLE,
+        difficulty          INT64 QUERYABLE SORTABLE,
+        effects             STRING QUERYABLE SEARCHABLE SORTABLE,
+        installedAuthorName STRING QUERYABLE SEARCHABLE SORTABLE,
+        installedFrom       STRING QUERYABLE SEARCHABLE SORTABLE,
+        installedVersion    INT64 QUERYABLE SORTABLE,
+        name                STRING QUERYABLE SEARCHABLE SORTABLE,
+        publishedRecordName STRING QUERYABLE SEARCHABLE SORTABLE,
+        publishedVersion    INT64 QUERYABLE SORTABLE,
+        remixedFrom         STRING QUERYABLE SEARCHABLE SORTABLE,
+        seed                DOUBLE QUERYABLE SORTABLE,
+        stars               STRING QUERYABLE SEARCHABLE SORTABLE,
+        starsEarned         DOUBLE QUERYABLE SORTABLE,
+        updatedAt           DOUBLE QUERYABLE SORTABLE,
+        waves               LIST<STRING> QUERYABLE SEARCHABLE,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );
+
+    RECORD TYPE Progress (
+        "___createTime" TIMESTAMP,
+        "___createdBy"  REFERENCE,
+        "___etag"       STRING,
+        "___modTime"    TIMESTAMP,
+        "___modifiedBy" REFERENCE,
+        "___recordID"   REFERENCE QUERYABLE,
+        modifiedAt      DOUBLE QUERYABLE SORTABLE,
+        payload         STRING QUERYABLE SEARCHABLE SORTABLE,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );
+
+    RECORD TYPE PublishedChallenge (
+        "___createTime" TIMESTAMP,
+        "___createdBy"  REFERENCE,
+        "___etag"       STRING,
+        "___modTime"    TIMESTAMP,
+        "___modifiedBy" REFERENCE,
+        "___recordID"   REFERENCE QUERYABLE,
+        authorId        STRING QUERYABLE SEARCHABLE SORTABLE,
+        authorName      STRING QUERYABLE SEARCHABLE SORTABLE,
+        difficulty      INT64 QUERYABLE SORTABLE,
+        effects         STRING QUERYABLE SEARCHABLE SORTABLE,
+        installCount    INT64 QUERYABLE SORTABLE,
+        name            STRING QUERYABLE SEARCHABLE SORTABLE,
+        playCount       INT64 QUERYABLE SORTABLE,
+        publishedAt     DOUBLE QUERYABLE SORTABLE,
+        reportCount     INT64 QUERYABLE SORTABLE,
+        seed            DOUBLE QUERYABLE SORTABLE,
+        sourceCustomId  STRING QUERYABLE SEARCHABLE SORTABLE,
+        stars           STRING QUERYABLE SEARCHABLE SORTABLE,
+        status          STRING QUERYABLE SEARCHABLE SORTABLE,
+        updatedAt       DOUBLE QUERYABLE SORTABLE,
+        upvoteCount     INT64 QUERYABLE SORTABLE,
+        version         INT64 QUERYABLE SORTABLE,
+        waves           LIST<STRING> QUERYABLE SEARCHABLE,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );
+
+    RECORD TYPE Report (
+        "___createTime" TIMESTAMP,
+        "___createdBy"  REFERENCE,
+        "___etag"       STRING,
+        "___modTime"    TIMESTAMP,
+        "___modifiedBy" REFERENCE,
+        "___recordID"   REFERENCE QUERYABLE,
+        challengeRef    REFERENCE QUERYABLE,
+        note            STRING QUERYABLE SEARCHABLE,
+        reason          STRING QUERYABLE SEARCHABLE SORTABLE,
+        reportedAt      DOUBLE QUERYABLE SORTABLE,
+        reporterId      STRING QUERYABLE SEARCHABLE SORTABLE,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );
+
+    RECORD TYPE Score (
+        "___createTime" TIMESTAMP,
+        "___createdBy"  REFERENCE,
+        "___etag"       STRING,
+        "___modTime"    TIMESTAMP,
+        "___modifiedBy" REFERENCE,
+        "___recordID"   REFERENCE QUERYABLE,
+        attempts        INT64 QUERYABLE SORTABLE,
+        challengeRef    REFERENCE QUERYABLE,
+        pct             INT64 QUERYABLE SORTABLE,
+        playerId        STRING QUERYABLE SEARCHABLE SORTABLE,
+        playerName      STRING QUERYABLE SEARCHABLE SORTABLE,
+        recordedAt      DOUBLE QUERYABLE SORTABLE,
+        score           DOUBLE QUERYABLE SORTABLE,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );
+
+    RECORD TYPE Upvote (
+        "___createTime" TIMESTAMP,
+        "___createdBy"  REFERENCE,
+        "___etag"       STRING,
+        "___modTime"    TIMESTAMP,
+        "___modifiedBy" REFERENCE,
+        "___recordID"   REFERENCE QUERYABLE,
+        challengeRef    REFERENCE QUERYABLE,
+        playerId        STRING QUERYABLE SEARCHABLE SORTABLE,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );
+
+    RECORD TYPE Users (
+        "___createTime" TIMESTAMP,
+        "___createdBy"  REFERENCE,
+        "___etag"       STRING,
+        "___modTime"    TIMESTAMP,
+        "___modifiedBy" REFERENCE,
+        "___recordID"   REFERENCE QUERYABLE,
+        roles           LIST<INT64>,
+        GRANT WRITE TO "_creator",
+        GRANT READ TO "_world"
+    );

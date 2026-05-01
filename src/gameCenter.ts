@@ -97,7 +97,7 @@ export function getAchievementMeta(id: AchievementId): AchievementMeta | undefin
 }
 
 interface GameCenterPlugin {
-  authenticate(): Promise<{ authenticated: boolean }>;
+  authenticate(): Promise<{ authenticated: boolean; displayName?: string; alias?: string }>;
   submitScore(opts: { score: number; leaderboardId: string }): Promise<void>;
   reportAchievement(opts: {
     id: string;
@@ -112,6 +112,7 @@ const Plugin = registerPlugin<GameCenterPlugin>("GameCenter");
 
 let authenticated = false;
 let initStarted = false;
+let displayName: string | null = null;
 
 function isIOS(): boolean {
   return Capacitor.getPlatform() === "ios";
@@ -168,6 +169,7 @@ export async function initGameCenter(): Promise<void> {
   try {
     const result = await Plugin.authenticate();
     authenticated = result.authenticated;
+    displayName = result.displayName ?? result.alias ?? null;
   } catch (err) {
     console.warn("[GameCenter] authenticate failed:", err);
     authenticated = false;
@@ -278,4 +280,10 @@ export function isGameCenterAuthenticated(): boolean {
 
 export function isGameCenterAvailable(): boolean {
   return isIOS();
+}
+
+// Player's Game Center display name, captured at auth time. Returns
+// null on web or before auth completes; callers fall back to "Anonymous".
+export function getGameCenterDisplayName(): string | null {
+  return displayName;
 }

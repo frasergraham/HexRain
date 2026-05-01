@@ -8,6 +8,7 @@ import {
   type AchievementId,
   type AchievementMeta,
   getEarnedAchievements,
+  getGameCenterDisplayName,
   initGameCenter,
   isGameCenterAvailable,
   reportAchievement,
@@ -49,6 +50,7 @@ import {
 } from "./challenges";
 import {
   createCustomChallenge,
+  deleteCustomChallenge,
   getCustomChallenge,
   isCustomChallenge,
   listCustomChallenges,
@@ -73,6 +75,24 @@ import {
   restoreUnlockAll,
   type ProductInfo,
 } from "./storeKit";
+import {
+  hasUpvoted as cloudHasUpvoted,
+  installCommunity,
+  isCloudReady,
+  publishChallenge as cloudPublish,
+  queryCommunity,
+  removeUpvote as cloudRemoveUpvote,
+  reportChallenge,
+  submitCommunityScore,
+  topScores as cloudTopScores,
+  unpublishChallenge,
+  upvote as cloudUpvote,
+  type CommunitySort,
+  type CommunityScore,
+  type PublishedChallenge,
+  type ReportReason,
+} from "./cloudSync";
+import { isCloudKitAvailable } from "./cloudKit";
 import { hashSeed, mulberry32, type Random } from "./rng";
 
 // TEMP: until the IAP unlock flow is verified end-to-end on TestFlight,
@@ -1140,6 +1160,94 @@ export class Game {
         }
         return;
       }
+      // Community: sort chip pick.
+      const communitySortBtn = target?.closest('button[data-action="community-sort"]') as HTMLButtonElement | null;
+      if (communitySortBtn) {
+        playSfx("click");
+        const sort = communitySortBtn.dataset.sort as CommunitySort | undefined;
+        if (sort && sort !== this.communitySort) {
+          this.communitySort = sort;
+          this.communityLoaded = false;
+          if (this.state === "challengeSelect") this.renderChallengeSelect();
+          void this.refreshCommunity();
+        }
+        return;
+      }
+      // Community: install / play / upvote / leaderboard / report.
+      const communityInstallBtn = target?.closest('button[data-action="community-install"]') as HTMLButtonElement | null;
+      if (communityInstallBtn) {
+        playSfx("click");
+        const rn = communityInstallBtn.dataset.recordName;
+        if (rn) void this.handleCommunityInstall(rn);
+        return;
+      }
+      const communityPlayBtn = target?.closest('button[data-action="community-play"]') as HTMLButtonElement | null;
+      if (communityPlayBtn) {
+        playSfx("click");
+        const rn = communityPlayBtn.dataset.recordName;
+        if (rn) this.handleCommunityPlay(rn);
+        return;
+      }
+      const communityRemixBtn = target?.closest('button[data-action="community-remix"]') as HTMLButtonElement | null;
+      if (communityRemixBtn) {
+        playSfx("click");
+        const rn = communityRemixBtn.dataset.recordName;
+        if (rn) this.handleCommunityRemix(rn);
+        return;
+      }
+      const communityUpvoteBtn = target?.closest('button[data-action="community-upvote"]') as HTMLButtonElement | null;
+      if (communityUpvoteBtn) {
+        playSfx("click");
+        const rn = communityUpvoteBtn.dataset.recordName;
+        if (rn) void this.handleCommunityUpvote(rn);
+        return;
+      }
+      const communityLbBtn = target?.closest('button[data-action="community-leaderboard"]') as HTMLButtonElement | null;
+      if (communityLbBtn) {
+        playSfx("click");
+        const rn = communityLbBtn.dataset.recordName;
+        if (rn) void this.openLeaderboardSheet(rn);
+        return;
+      }
+      const communityReportBtn = target?.closest('button[data-action="community-report"]') as HTMLButtonElement | null;
+      if (communityReportBtn) {
+        playSfx("click");
+        const rn = communityReportBtn.dataset.recordName;
+        if (rn) this.openReportDialog(rn);
+        return;
+      }
+      // Leaderboard / report sheet close (backdrop tap or × button).
+      const closeLbBtn = target?.closest('[data-action="close-leaderboard"]') as HTMLElement | null;
+      if (closeLbBtn) {
+        // Backdrop has the same data-action as the × button; ignore
+        // bubbles from inside the sheet body so a tap on a row doesn't
+        // dismiss the modal.
+        const insideSheet = closeLbBtn.classList.contains("modal-backdrop")
+          ? target === closeLbBtn || (target as HTMLElement)?.classList?.contains("modal-close")
+          : true;
+        if (insideSheet) {
+          playSfx("click");
+          this.closeLeaderboardSheet();
+        }
+        return;
+      }
+      const closeReportBtn = target?.closest('[data-action="close-report"]') as HTMLElement | null;
+      if (closeReportBtn) {
+        const insideSheet = closeReportBtn.classList.contains("modal-backdrop")
+          ? target === closeReportBtn || (target as HTMLElement)?.classList?.contains("modal-close")
+          : true;
+        if (insideSheet) {
+          playSfx("click");
+          this.closeReportDialog();
+        }
+        return;
+      }
+      const submitReportBtn = target?.closest('button[data-action="submit-report"]') as HTMLButtonElement | null;
+      if (submitReportBtn) {
+        playSfx("click");
+        void this.submitReport();
+        return;
+      }
       const backBtn = target?.closest('button[data-action="challenge-back"]') as HTMLButtonElement | null;
       if (backBtn) {
         playSfx("click");
@@ -1220,7 +1328,37 @@ export class Game {
         playSfx("click");
         const id = editorPublishBtn.dataset.customId;
         const c = id ? getCustomChallenge(id) : undefined;
-        if (c) this.publishCustomChallenge(c);
+        if (c) void this.publishCustomChallenge(c);
+        return;
+      }
+      const editorUnpublishBtn = target?.closest('button[data-action="editor-unpublish"]') as HTMLButtonElement | null;
+      if (editorUnpublishBtn && !editorUnpublishBtn.disabled) {
+        playSfx("click");
+        const id = editorUnpublishBtn.dataset.customId;
+        const c = id ? getCustomChallenge(id) : undefined;
+        if (c) void this.unpublishCustomChallenge(c);
+        return;
+      }
+      // Delete a custom challenge (revealed by swipe-left). Confirmation
+      // dialog before destruction; cancel re-closes the swipe row.
+      const editorDeleteBtn = target?.closest('button[data-action="editor-delete"]') as HTMLButtonElement | null;
+      if (editorDeleteBtn) {
+        playSfx("click");
+        const id = editorDeleteBtn.dataset.customId;
+        if (!id) return;
+        const c = getCustomChallenge(id);
+        if (!c) return;
+        const confirmed = window.confirm(
+          `Delete "${c.name}"?\n\nThis can't be undone. Your local copy is removed; if it's published, the public version stays up until you UNPUBLISH from the editor.`,
+        );
+        if (confirmed) {
+          deleteCustomChallenge(id);
+          this.swipeOpenId = null;
+          if (this.state === "editorHome") this.renderEditorHome();
+        } else {
+          // Snap the row back closed.
+          this.closeSwipeRow();
+        }
         return;
       }
       // Editor home: REMIX on a roster row clones it into My Challenges
@@ -1236,6 +1374,28 @@ export class Game {
             difficulty: def.difficulty,
             effects: def.effects ?? {},
             waves: def.waves,
+          });
+          this.openEditorEdit(cloned);
+        }
+        return;
+      }
+      // Remix an installed community challenge into a fresh editable
+      // copy. Same flow as roster remix — clones name/difficulty/effects/
+      // waves and stamps a "by Author" attribution into the name. The
+      // new copy is independent of the source (no installedFrom link,
+      // no auto-update).
+      const editorRemixCustomBtn = target?.closest('button[data-action="editor-remix-custom"]') as HTMLButtonElement | null;
+      if (editorRemixCustomBtn) {
+        playSfx("click");
+        const customId = editorRemixCustomBtn.dataset.customId;
+        const src = customId ? getCustomChallenge(customId) : undefined;
+        if (src) {
+          const author = src.installedAuthorName ?? "the community";
+          const cloned = remixCustomChallenge({
+            name: `${src.name} (by ${author})`,
+            difficulty: src.difficulty,
+            effects: src.effects,
+            waves: src.waves,
           });
           this.openEditorEdit(cloned);
         }
@@ -1678,12 +1838,84 @@ export class Game {
       if (target.dataset.dialogField) {
         this.applyAdvancedFieldToLine(target);
       }
+      // Report dialog: radio pick updates the in-flight reason.
+      if (target instanceof HTMLInputElement && target.name === "report-reason" && this.reportSheet) {
+        this.reportSheet.reason = target.value as ReportReason;
+      }
     });
     this.overlay.addEventListener("blur", (e) => {
       const target = e.target as HTMLElement | null;
       if (!target || !(target as HTMLInputElement).dataset?.editorField) return;
       this.handleEditorFieldCommit();
     }, true);
+
+    // Swipe-to-delete on editor home rows. Pointer events cover both
+    // touch and mouse so trackpad/desktop testing works the same way.
+    // We attach to the overlay (delegated) so re-renders don't have to
+    // re-wire individual rows.
+    this.overlay.addEventListener("pointerdown", (e) => {
+      const swipe = (e.target as HTMLElement | null)?.closest(".editor-home-row-swipe") as HTMLElement | null;
+      if (!swipe) return;
+      // Don't start a new drag from a tap on the revealed DELETE button
+      // — the click handler above takes that path.
+      if ((e.target as HTMLElement)?.closest('[data-action="editor-delete"]')) return;
+      // Tapping inside an unrelated open row should close that row first
+      // (one row open at a time). Don't begin a new drag in that case.
+      if (this.swipeOpenId && this.swipeOpenId !== swipe.dataset.swipeId) {
+        this.closeSwipeRow();
+        return;
+      }
+      this.swipeId = swipe.dataset.swipeId ?? null;
+      this.swipeStartX = e.clientX;
+      this.swipeStartY = e.clientY;
+      this.swipeAxisLocked = "none";
+    });
+    this.overlay.addEventListener("pointermove", (e) => {
+      if (!this.swipeId) return;
+      const dx = e.clientX - this.swipeStartX;
+      const dy = e.clientY - this.swipeStartY;
+      if (this.swipeAxisLocked === "none") {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) < Game.SWIPE_AXIS_THRESHOLD_PX) return;
+        this.swipeAxisLocked = Math.abs(dx) > Math.abs(dy) ? "horizontal" : "vertical";
+      }
+      if (this.swipeAxisLocked !== "horizontal") return;
+      // Compute the visible offset, clamped so the row never travels
+      // right of resting position and never further left than the
+      // reveal width (no overscroll).
+      const base = this.swipeOpenId === this.swipeId ? -Game.SWIPE_REVEAL_PX : 0;
+      const offset = Math.min(0, Math.max(-Game.SWIPE_REVEAL_PX, base + dx));
+      const swipe = this.overlay.querySelector<HTMLElement>(`.editor-home-row-swipe[data-swipe-id="${cssAttrEscape(this.swipeId)}"]`);
+      const row = swipe?.querySelector<HTMLElement>(".editor-home-row");
+      if (row) row.style.transform = `translateX(${offset}px)`;
+      e.preventDefault();
+    }, { passive: false });
+    const finishSwipe = (e: PointerEvent) => {
+      if (!this.swipeId) return;
+      const id = this.swipeId;
+      this.swipeId = null;
+      if (this.swipeAxisLocked !== "horizontal") return;
+      const dx = e.clientX - this.swipeStartX;
+      const wasOpen = this.swipeOpenId === id;
+      const totalOffset = (wasOpen ? -Game.SWIPE_REVEAL_PX : 0) + dx;
+      // Snap open if the row crossed the half-reveal threshold; otherwise close.
+      const shouldOpen = totalOffset < -Game.SWIPE_REVEAL_PX / 2;
+      const swipe = this.overlay.querySelector<HTMLElement>(`.editor-home-row-swipe[data-swipe-id="${cssAttrEscape(id)}"]`);
+      const row = swipe?.querySelector<HTMLElement>(".editor-home-row");
+      if (row) {
+        row.style.transition = "transform 160ms ease-out";
+        row.style.transform = `translateX(${shouldOpen ? -Game.SWIPE_REVEAL_PX : 0}px)`;
+        // Drop the transition once the snap finishes so the next drag
+        // is responsive (no easing during pointermove).
+        setTimeout(() => { if (row) row.style.transition = ""; }, 200);
+      }
+      // If we just opened a different row, close the previously open one.
+      if (shouldOpen && this.swipeOpenId && this.swipeOpenId !== id) {
+        this.closeSwipeRow();
+      }
+      this.swipeOpenId = shouldOpen ? id : null;
+    };
+    this.overlay.addEventListener("pointerup", finishSwipe);
+    this.overlay.addEventListener("pointercancel", finishSwipe);
 
     this.debugEnabled =
       new URLSearchParams(window.location.search).get("debug") === "1";
@@ -1906,6 +2138,19 @@ export class Game {
   // in which case the high score should NOT be banked at game over.
   private debugRun = false;
   private debugEnabled = false;
+
+  // Swipe-to-delete state for the editor home list. At most one row can
+  // be open at a time. `swipeOpenId` is the data-swipe-id of the row
+  // currently translated; `swipeStartX/Y` and `swipeId` track an
+  // in-progress drag. swipeAxisLocked flips to "horizontal" once the
+  // user has moved enough horizontally to commit (suppresses page scroll).
+  private swipeOpenId: string | null = null;
+  private swipeId: string | null = null;
+  private swipeStartX = 0;
+  private swipeStartY = 0;
+  private swipeAxisLocked: "none" | "horizontal" | "vertical" = "none";
+  private static readonly SWIPE_REVEAL_PX = 96;
+  private static readonly SWIPE_AXIS_THRESHOLD_PX = 8;
   // Last "start at N" the player picked from the debug dropdown, so the
   // PLAY AGAIN button on game-over can resume from the same score.
   private debugStartScore = 0;
@@ -1918,6 +2163,22 @@ export class Game {
   // when openUnlockShop() runs so the Back button returns to the right
   // surface (menu vs challenge select).
   private unlockShopReturnState: GameState = "menu";
+
+  // Community challenge browse state. Cached so re-rendering the
+  // challenge select (e.g. after a back-from-intro) doesn't refetch.
+  // Cleared when leaving the challenge select.
+  private communityChallenges: PublishedChallenge[] = [];
+  private communitySort: CommunitySort = "newest";
+  private communityLoaded = false;
+  private communityLoading = false;
+  private communityError: string | null = null;
+  // Local upvote cache: which PublishedChallenge record names this
+  // player has upvoted in their CK Upvote rows. Loaded lazily on first
+  // browse so the heart icon shows the correct filled / hollow state.
+  private upvoteCache = new Set<string>();
+  // Per-modal state for the leaderboard + report sheets.
+  private leaderboardSheet: { recordName: string; rows: CommunityScore[]; loading: boolean } | null = null;
+  private reportSheet: { recordName: string; reason: ReportReason; note: string } | null = null;
 
   // Spawn-side RNG. Defaults to Math.random for endless mode; swapped
   // to a seeded mulberry32 keyed on the challenge id at startChallenge,
@@ -2193,6 +2454,7 @@ export class Game {
     this.editorSelectedWaveIdx = 0;
     this.editorDialog = null;
     this.editorDialogWaveIdx = null;
+    this.swipeOpenId = null;
     this.setScoreVisible(false);
     this.setPauseButtonVisible(false);
     this.setHudVisible(false);
@@ -2254,28 +2516,55 @@ export class Game {
             const pctText = c.bestPct > 0
               ? `<span class="challenge-card-pct${c.bestPct >= 100 ? " full" : ""}">${c.bestPct}%</span>`
               : `<span class="challenge-card-pct">—</span>`;
-            const publishCls = this.debugEnabled
+            // Publish/Update button is enabled either in debug (legacy
+            // "copy roster JSON to clipboard" path) or whenever the
+            // CloudKit bridge is available (iOS). Web users see it
+            // disabled with the same chrome so the layout is stable.
+            const publishEnabled = this.debugEnabled || isCloudKitAvailable();
+            const publishCls = publishEnabled
               ? "editor-row-btn editor-row-btn-publish"
               : "editor-row-btn editor-row-btn-publish disabled";
-            const publishAttr = this.debugEnabled ? "" : "disabled";
+            const publishAttr = publishEnabled ? "" : "disabled";
+            const isPublished = !!c.publishedRecordName;
+            const publishLabel = isPublished ? "UPDATE" : "PUBLISH";
+            const unpublishHtml = isPublished
+              ? `<button type="button" class="editor-row-btn editor-row-btn-unpublish" data-action="editor-unpublish" data-custom-id="${escapeHtml(c.id)}">UNPUBLISH</button>`
+              : "";
+            const publishedBadge = isPublished
+              ? `<span class="editor-home-row-published">PUBLISHED v${c.publishedVersion ?? 1}</span>`
+              : "";
             const remixLine = c.remixedFrom
               ? `<span class="editor-home-row-remix">Remixed from: ${escapeHtml(c.remixedFrom)}</span>`
               : "";
+            const installedLine = c.installedFrom
+              ? `<span class="editor-home-row-installed">Installed from ${escapeHtml(c.installedAuthorName ?? "the community")}${c.installedVersion ? ` · v${c.installedVersion}` : ""}</span>`
+              : "";
+            // Each row sits inside a swipeable container that reveals
+            // a DELETE action on left-swipe. The actual <button> for
+            // delete lives at the right edge, full-height; the row on
+            // top translates to expose it. Tapping it confirms then
+            // deletes via deleteCustomChallenge.
             return `
-              <div class="editor-home-row" data-custom-id="${escapeHtml(c.id)}">
-                <div class="editor-home-row-meta">
-                  <span class="challenge-card-id">CUSTOM</span>
-                  <span class="challenge-card-name">${escapeHtml(c.name)}</span>
-                  ${remixLine}
-                  <div class="challenge-card-hexes">${hexes.join("")}</div>
-                  ${starsHtml}
-                  <span class="challenge-card-best">${bestScoreText} ${pctText}</span>
-                  <span class="editor-home-row-date">Created ${dateStr}</span>
-                </div>
-                <div class="editor-home-row-actions">
-                  <button type="button" class="editor-row-btn editor-row-btn-play" data-action="editor-play" data-custom-id="${escapeHtml(c.id)}">PLAY</button>
-                  <button type="button" class="editor-row-btn editor-row-btn-edit" data-action="editor-edit" data-custom-id="${escapeHtml(c.id)}">EDIT</button>
-                  <button type="button" class="${publishCls}" data-action="editor-publish" data-custom-id="${escapeHtml(c.id)}" ${publishAttr}>PUBLISH</button>
+              <div class="editor-home-row-swipe" data-swipe-id="${escapeHtml(c.id)}">
+                <button type="button" class="editor-home-row-delete" data-action="editor-delete" data-custom-id="${escapeHtml(c.id)}" tabindex="-1" aria-label="Delete challenge">DELETE</button>
+                <div class="editor-home-row" data-custom-id="${escapeHtml(c.id)}">
+                  <div class="editor-home-row-meta">
+                    <span class="challenge-card-id">CUSTOM</span>
+                    <span class="challenge-card-name">${escapeHtml(c.name)}</span>
+                    ${publishedBadge}
+                    ${remixLine}
+                    ${installedLine}
+                    <div class="challenge-card-hexes">${hexes.join("")}</div>
+                    ${starsHtml}
+                    <span class="challenge-card-best">${bestScoreText} ${pctText}</span>
+                    <span class="editor-home-row-date">Created ${dateStr}</span>
+                  </div>
+                  <div class="editor-home-row-actions">
+                    <button type="button" class="editor-row-btn editor-row-btn-play" data-action="editor-play" data-custom-id="${escapeHtml(c.id)}">PLAY</button>
+                    <button type="button" class="editor-row-btn editor-row-btn-edit" data-action="editor-edit" data-custom-id="${escapeHtml(c.id)}">EDIT</button>
+                    <button type="button" class="${publishCls}" data-action="editor-publish" data-custom-id="${escapeHtml(c.id)}" ${publishAttr}>${publishLabel}</button>
+                    ${unpublishHtml}
+                  </div>
                 </div>
               </div>
             `;
@@ -2285,37 +2574,62 @@ export class Game {
     // Remix-existing section: every roster challenge in an unlocked block
     // gets a row with a single REMIX button that clones it into My
     // Challenges. Locked blocks are excluded — players shouldn't be able
-    // to remix content they haven't unlocked.
+    // to remix content they haven't unlocked. After the roster, we
+    // append every installed community challenge as a remix source so
+    // the player can fork someone else's published level into their
+    // own editable copy.
     const progress = loadChallengeProgress();
     const unlockedSet = new Set(progress.unlockedBlocks);
-    const remixSource = CHALLENGES.filter((def) => unlockedSet.has(def.block));
-    const remixRows = remixSource
-      .map((def) => {
-        const tint = difficultyTint(def.difficulty);
-        const hexes: string[] = [];
-        for (let i = 0; i < def.difficulty; i++) {
-          hexes.push(`<span class="challenge-card-hex" style="background:${tint};"></span>`);
-        }
-        return `
-          <div class="editor-home-row editor-home-row-remix-source">
-            <div class="editor-home-row-meta">
-              <span class="challenge-card-id">${escapeHtml(def.id)}</span>
-              <span class="challenge-card-name">${escapeHtml(def.name)}</span>
-              <div class="challenge-card-hexes">${hexes.join("")}</div>
-            </div>
-            <div class="editor-home-row-actions">
-              <button type="button" class="editor-row-btn editor-row-btn-edit" data-action="editor-remix" data-roster-id="${escapeHtml(def.id)}">REMIX</button>
-            </div>
+    const remixRoster = CHALLENGES.filter((def) => unlockedSet.has(def.block));
+    const remixCommunity = list.filter((c) => !!c.installedFrom);
+    const remixCount = remixRoster.length + remixCommunity.length;
+    const rosterRows = remixRoster.map((def) => {
+      const tint = difficultyTint(def.difficulty);
+      const hexes: string[] = [];
+      for (let i = 0; i < def.difficulty; i++) {
+        hexes.push(`<span class="challenge-card-hex" style="background:${tint};"></span>`);
+      }
+      return `
+        <div class="editor-home-row editor-home-row-remix-source">
+          <div class="editor-home-row-meta">
+            <span class="challenge-card-id">${escapeHtml(def.id)}</span>
+            <span class="challenge-card-name">${escapeHtml(def.name)}</span>
+            <div class="challenge-card-hexes">${hexes.join("")}</div>
           </div>
-        `;
-      })
-      .join("");
-    const remixSection = remixSource.length > 0
+          <div class="editor-home-row-actions">
+            <button type="button" class="editor-row-btn editor-row-btn-edit" data-action="editor-remix" data-roster-id="${escapeHtml(def.id)}">REMIX</button>
+          </div>
+        </div>
+      `;
+    }).join("");
+    const communityRows = remixCommunity.map((c) => {
+      const tint = difficultyTint(c.difficulty);
+      const hexes: string[] = [];
+      for (let i = 0; i < c.difficulty; i++) {
+        hexes.push(`<span class="challenge-card-hex" style="background:${tint};"></span>`);
+      }
+      const author = c.installedAuthorName ?? "the community";
+      return `
+        <div class="editor-home-row editor-home-row-remix-source editor-home-row-remix-community">
+          <div class="editor-home-row-meta">
+            <span class="challenge-card-id">COMMUNITY</span>
+            <span class="challenge-card-name">${escapeHtml(c.name)}</span>
+            <span class="editor-home-row-installed">by ${escapeHtml(author)}</span>
+            <div class="challenge-card-hexes">${hexes.join("")}</div>
+          </div>
+          <div class="editor-home-row-actions">
+            <button type="button" class="editor-row-btn editor-row-btn-edit" data-action="editor-remix-custom" data-custom-id="${escapeHtml(c.id)}">REMIX</button>
+          </div>
+        </div>
+      `;
+    }).join("");
+    const remixRows = rosterRows + communityRows;
+    const remixSection = remixCount > 0
       ? `
         <section class="challenge-block">
           <header class="challenge-block-header">
             <span>Remix Existing</span>
-            <span class="progress">${remixSource.length}</span>
+            <span class="progress">${remixCount}</span>
           </header>
           <div class="editor-home-rows">${remixRows}</div>
         </section>
@@ -4188,31 +4502,97 @@ export class Game {
     });
   }
 
-  // ----- Publish (debug only) ------------------------------------------
+  // ----- Publish to Community ------------------------------------------
 
-  private publishCustomChallenge(custom: CustomChallenge): void {
-    if (!this.debugEnabled) return;
-    const rosterId = window.prompt('Roster ID? (e.g. "7-1")', "");
-    if (!rosterId) return;
-    const blockMatch = rosterId.match(/^(\d)-(\d)$/);
-    const block = blockMatch ? Math.max(1, Math.min(6, parseInt(blockMatch[1]!, 10))) : 1;
-    const index = blockMatch ? Math.max(1, Math.min(5, parseInt(blockMatch[2]!, 10))) : 1;
-    const def = {
-      id: rosterId,
-      name: custom.name,
-      block,
-      index,
-      difficulty: custom.difficulty,
-      effects: { ...custom.effects },
-      waves: [...custom.waves],
-    };
-    const json = JSON.stringify(def, null, 2);
-    void navigator.clipboard?.writeText(json).catch(() => { /* ignore */ });
-    // Also dump to console so debug users can inspect even without
-    // clipboard permission.
-    // eslint-disable-next-line no-console
-    console.log("[editor] published:", json);
-    window.alert("Challenge definition copied to clipboard (and logged to console).");
+  private async publishCustomChallenge(custom: CustomChallenge): Promise<void> {
+    // Debug mode keeps the legacy "copy roster JSON to clipboard" flow
+    // for authoring official content; everywhere else routes through
+    // the real CloudKit publish path.
+    if (this.debugEnabled && !isCloudKitAvailable()) {
+      const rosterId = window.prompt('Roster ID? (e.g. "7-1")', "");
+      if (!rosterId) return;
+      const blockMatch = rosterId.match(/^(\d)-(\d)$/);
+      const block = blockMatch ? Math.max(1, Math.min(6, parseInt(blockMatch[1]!, 10))) : 1;
+      const index = blockMatch ? Math.max(1, Math.min(5, parseInt(blockMatch[2]!, 10))) : 1;
+      const def = {
+        id: rosterId,
+        name: custom.name,
+        block,
+        index,
+        difficulty: custom.difficulty,
+        effects: { ...custom.effects },
+        waves: [...custom.waves],
+      };
+      const json = JSON.stringify(def, null, 2);
+      void navigator.clipboard?.writeText(json).catch(() => { /* ignore */ });
+      // eslint-disable-next-line no-console
+      console.log("[editor] published:", json);
+      window.alert("Challenge definition copied to clipboard (and logged to console).");
+      return;
+    }
+
+    if (!isCloudKitAvailable()) {
+      window.alert("Publishing requires iOS with iCloud signed in.");
+      return;
+    }
+    const errors = validateCustomChallenge(custom);
+    if (errors.length > 0) {
+      window.alert("Fix these before publishing:\n\n• " + errors.join("\n• "));
+      return;
+    }
+    const isUpdate = !!custom.publishedRecordName;
+    const verb = isUpdate ? "Update your published challenge" : "Publish to Community";
+    const disclaimer = isUpdate
+      ? "Your name and the new content will replace the previous version for everyone who has installed it. Their best scores will be kept."
+      : "Your Game Center display name and this challenge will be visible to other players. Inappropriate names can be reported and removed.";
+    if (!window.confirm(`${verb}?\n\n${disclaimer}`)) return;
+
+    if (!(await isCloudReady())) {
+      window.alert("iCloud isn't available. Check Settings → iCloud and try again.");
+      return;
+    }
+    const authorName = getGameCenterDisplayName() ?? "Anonymous";
+    const result = await cloudPublish(custom, authorName);
+    if (!result.ok) {
+      const msg = result.moderation?.message
+        ?? result.error
+        ?? "Publish failed. Please try again.";
+      window.alert(msg);
+      return;
+    }
+    window.alert(isUpdate ? "Update published." : "Challenge published to Community.");
+    // Re-render the editor home so the PUBLISH button switches to UPDATE
+    // and the new "Published" badge appears.
+    if (this.state === "editorHome") this.renderEditorHome();
+    // Invalidate community cache so the next visit shows the new entry.
+    this.communityLoaded = false;
+  }
+
+  // Snap any currently-open swipe row back to its resting position.
+  // No-op if nothing is open. Used when cancelling a delete confirm,
+  // tapping outside the open row, or re-rendering the editor home.
+  private closeSwipeRow(): void {
+    if (!this.swipeOpenId) return;
+    const swipe = this.overlay.querySelector<HTMLElement>(`.editor-home-row-swipe[data-swipe-id="${cssAttrEscape(this.swipeOpenId)}"]`);
+    const row = swipe?.querySelector<HTMLElement>(".editor-home-row");
+    if (row) {
+      row.style.transition = "transform 160ms ease-out";
+      row.style.transform = "translateX(0)";
+      setTimeout(() => { if (row) row.style.transition = ""; }, 200);
+    }
+    this.swipeOpenId = null;
+  }
+
+  private async unpublishCustomChallenge(custom: CustomChallenge): Promise<void> {
+    if (!custom.publishedRecordName) return;
+    if (!window.confirm(`Unpublish "${custom.name}"?\n\nIt will be removed from the Community list. Players who have already installed it keep their copies.`)) return;
+    const ok = await unpublishChallenge(custom);
+    if (!ok) {
+      window.alert("Couldn't unpublish. Try again later.");
+      return;
+    }
+    if (this.state === "editorHome") this.renderEditorHome();
+    this.communityLoaded = false;
   }
 
   private renderUnlockShop(): void {
@@ -4255,6 +4635,10 @@ export class Game {
     this.setPauseButtonVisible(false);
     this.setHudVisible(false);
     this.setInPlay(false);
+    // Modal state from a prior visit shouldn't carry over — close any
+    // open leaderboard / report sheets before re-rendering.
+    this.leaderboardSheet = null;
+    this.reportSheet = null;
     this.renderChallengeSelect();
     this.overlay.classList.remove("hidden");
     // Kick off the StoreKit product fetch the first time the player visits
@@ -4463,20 +4847,29 @@ export class Game {
         }));
       }
     }
-    // Community Challenges placeholder. Same collapsible chrome so the
-    // three sections feel like a set; body announces upcoming
-    // shared-challenges feature so players know more is on the way.
+    // Community Challenges section. On web (no CloudKit) we keep the
+    // "coming soon" placeholder copy so players know what's planned;
+    // on iOS we render the live list backed by cloudSync.queryCommunity.
+    const communityBody = isCloudKitAvailable()
+      ? this.renderCommunityBody()
+      : `<div class="challenge-community-placeholder">
+          <span class="challenge-community-tag">iOS ONLY</span>
+          <p>Player-shared challenges live in iCloud and require the iOS app to browse.</p>
+        </div>`;
     sections.push(renderCollapsibleSection({
       key: "community",
       title: "Community Challenges",
       collapsed: loadCollapsed("community"),
-      body: `
-        <div class="challenge-community-placeholder">
-          <span class="challenge-community-tag">COMING SOON</span>
-          <p>Player-shared challenges will live here once the editor opens up to publishing.</p>
-        </div>
-      `,
+      body: communityBody,
     }));
+    // Lazy-load the community list the first time the section renders
+    // (and on every fresh open of challenge select after a publish/
+    // install/etc. invalidates the cache). The render call above
+    // immediately shows a "Loading…" stub; refreshCommunity flips to
+    // the populated list when the query resolves.
+    if (isCloudKitAvailable() && !this.communityLoaded && !this.communityLoading) {
+      void this.refreshCommunity();
+    }
     this.overlay.innerHTML = `
       <div class="challenge-select">
         <div class="challenge-select-top">
@@ -4486,7 +4879,303 @@ export class Game {
         </div>
         ${sections.join("")}
       </div>
+      ${this.renderLeaderboardSheetHtml()}
+      ${this.renderReportSheetHtml()}
     `;
+  }
+
+  // ----- Community challenges -------------------------------------------
+
+  // Body markup for the Community collapsible. Uses cached state — the
+  // first render returns a "Loading…" stub and refreshCommunity()
+  // re-renders the whole challenge select once the query resolves.
+  private renderCommunityBody(): string {
+    if (this.communityLoading && this.communityChallenges.length === 0) {
+      return `<div class="challenge-community-status">Loading community challenges…</div>`;
+    }
+    if (this.communityError) {
+      return `<div class="challenge-community-status">Couldn't load community challenges. Pull to retry.</div>`;
+    }
+    const sortOpts: Array<{ id: CommunitySort; label: string }> = [
+      { id: "newest", label: "NEW" },
+      { id: "topVoted", label: "TOP" },
+      { id: "mostPlayed", label: "ACTIVE" },
+      { id: "installed", label: "INSTALLED" },
+    ];
+    const sortChips = sortOpts.map((o) => `
+      <button type="button" class="community-sort-chip${o.id === this.communitySort ? " selected" : ""}"
+        data-action="community-sort" data-sort="${o.id}">${o.label}</button>
+    `).join("");
+    if (this.communityChallenges.length === 0 && this.communityLoaded) {
+      return `
+        <div class="community-sort-row">${sortChips}</div>
+        <div class="challenge-community-placeholder">
+          <span class="challenge-community-tag">EMPTY</span>
+          <p>No community challenges yet. Publish one from the editor to seed the list!</p>
+        </div>
+      `;
+    }
+    const installedSet = new Set(
+      listCustomChallenges()
+        .map((c) => c.installedFrom)
+        .filter((rn): rn is string => typeof rn === "string"),
+    );
+    const cards = this.communityChallenges.map((p) => {
+      const tint = difficultyTint(p.difficulty);
+      const hexes: string[] = [];
+      for (let i = 0; i < p.difficulty; i++) {
+        hexes.push(`<span class="challenge-card-hex" style="background:${tint};"></span>`);
+      }
+      const installed = installedSet.has(p.recordName);
+      const upvoted = this.upvoteCache.has(p.recordName);
+      const installedBadge = installed
+        ? `<span class="challenge-card-installed">INSTALLED</span>`
+        : "";
+      const playOrInstall = installed
+        ? `<button type="button" class="community-card-btn community-card-btn-play" data-action="community-play" data-record-name="${escapeHtml(p.recordName)}">PLAY</button>`
+        : `<button type="button" class="community-card-btn community-card-btn-install" data-action="community-install" data-record-name="${escapeHtml(p.recordName)}">INSTALL</button>`;
+      const waveCount = p.waves.length;
+      const waveLabel = `${waveCount} ${waveCount === 1 ? "wave" : "waves"}`;
+      return `
+        <div class="challenge-card challenge-card-community">
+          <span class="challenge-card-id">COMMUNITY</span>
+          <span class="challenge-card-name">${escapeHtml(p.name)}</span>
+          <span class="challenge-card-author">by ${escapeHtml(p.authorName)}</span>
+          <div class="challenge-card-hex-row">
+            <div class="challenge-card-hexes">${hexes.join("")}</div>
+            <span class="challenge-card-waves">${waveLabel}</span>
+          </div>
+          <div class="challenge-card-stats">
+            <span title="Installs">⬇ ${p.installCount}</span>
+            <span title="Plays">▶ ${p.playCount}</span>
+            <span title="Likes">♥ ${p.upvoteCount}</span>
+          </div>
+          ${installedBadge}
+          <div class="community-card-actions">
+            ${playOrInstall}
+            <button type="button" class="community-card-btn community-card-btn-remix" data-action="community-remix" data-record-name="${escapeHtml(p.recordName)}">REMIX</button>
+            <div class="community-card-icon-row">
+              <button type="button" class="community-card-icon-btn${upvoted ? " filled-like" : ""}" data-action="community-upvote" data-record-name="${escapeHtml(p.recordName)}" aria-label="Like">${upvoted ? "♥" : "♡"}</button>
+              <button type="button" class="community-card-icon-btn" data-action="community-leaderboard" data-record-name="${escapeHtml(p.recordName)}" aria-label="Leaderboard">🏆</button>
+              <button type="button" class="community-card-icon-btn" data-action="community-report" data-record-name="${escapeHtml(p.recordName)}" aria-label="Report">⚑</button>
+            </div>
+          </div>
+        </div>
+      `;
+    }).join("");
+    return `
+      <div class="community-sort-row">${sortChips}</div>
+      <div class="challenge-cards challenge-cards-community">${cards}</div>
+    `;
+  }
+
+  private async refreshCommunity(): Promise<void> {
+    if (!isCloudKitAvailable()) return;
+    if (this.communityLoading) return;
+    this.communityLoading = true;
+    this.communityError = null;
+    try {
+      const result = await queryCommunity({ sort: this.communitySort, limit: 50 });
+      this.communityChallenges = result.challenges;
+      this.communityLoaded = true;
+      // Hydrate the local upvote cache for whatever's on screen, in
+      // parallel. Best-effort — the heart icon defaults to hollow and
+      // flips to filled as each fetch resolves.
+      void this.hydrateUpvoteCache(result.challenges);
+    } catch (err) {
+      console.warn("[community] refresh failed:", err);
+      this.communityError = String(err);
+    } finally {
+      this.communityLoading = false;
+      if (this.state === "challengeSelect") this.renderChallengeSelect();
+    }
+  }
+
+  private async hydrateUpvoteCache(list: PublishedChallenge[]): Promise<void> {
+    const before = this.upvoteCache.size;
+    await Promise.all(list.map(async (p) => {
+      if (this.upvoteCache.has(p.recordName)) return;
+      const has = await cloudHasUpvoted(p.recordName);
+      if (has) this.upvoteCache.add(p.recordName);
+    }));
+    if (this.upvoteCache.size !== before && this.state === "challengeSelect") {
+      this.renderChallengeSelect();
+    }
+  }
+
+  private async handleCommunityInstall(recordName: string): Promise<void> {
+    const p = this.communityChallenges.find((c) => c.recordName === recordName);
+    if (!p) return;
+    const installed = await installCommunity(p);
+    if (!installed) {
+      window.alert("Couldn't install. Check iCloud connectivity and try again.");
+      return;
+    }
+    if (this.state === "challengeSelect") this.renderChallengeSelect();
+  }
+
+  private handleCommunityPlay(recordName: string): void {
+    const local = listCustomChallenges().find((c) => c.installedFrom === recordName);
+    if (!local) return;
+    this.playCustomChallenge(local, 0);
+  }
+
+  // Fork a published challenge into the user's own My Challenges as an
+  // editable copy. Independent of the published source (no installedFrom
+  // link, won't auto-update on author edits) — same semantics as
+  // remixing a roster challenge in the editor home. Drops the player
+  // into the editor on the new copy so they can start tweaking.
+  private handleCommunityRemix(recordName: string): void {
+    const p = this.communityChallenges.find((c) => c.recordName === recordName);
+    if (!p) return;
+    const cloned = remixCustomChallenge({
+      name: `${p.name} (by ${p.authorName})`,
+      difficulty: p.difficulty,
+      effects: p.effects,
+      waves: p.waves,
+    });
+    this.openEditorEdit(cloned);
+  }
+
+  private async handleCommunityUpvote(recordName: string): Promise<void> {
+    const idx = this.communityChallenges.findIndex((c) => c.recordName === recordName);
+    if (idx < 0) return;
+    const wasUpvoted = this.upvoteCache.has(recordName);
+    // Optimistic UI: update local count + cache before the round-trip
+    // resolves, then revert if the call fails.
+    if (wasUpvoted) {
+      this.upvoteCache.delete(recordName);
+      this.communityChallenges[idx]!.upvoteCount = Math.max(0, this.communityChallenges[idx]!.upvoteCount - 1);
+    } else {
+      this.upvoteCache.add(recordName);
+      this.communityChallenges[idx]!.upvoteCount += 1;
+    }
+    if (this.state === "challengeSelect") this.renderChallengeSelect();
+    const ok = wasUpvoted
+      ? await cloudRemoveUpvote(recordName)
+      : await cloudUpvote(recordName);
+    if (!ok) {
+      // Revert on failure.
+      if (wasUpvoted) {
+        this.upvoteCache.add(recordName);
+        this.communityChallenges[idx]!.upvoteCount += 1;
+      } else {
+        this.upvoteCache.delete(recordName);
+        this.communityChallenges[idx]!.upvoteCount = Math.max(0, this.communityChallenges[idx]!.upvoteCount - 1);
+      }
+      if (this.state === "challengeSelect") this.renderChallengeSelect();
+    }
+  }
+
+  private async openLeaderboardSheet(recordName: string): Promise<void> {
+    this.leaderboardSheet = { recordName, rows: [], loading: true };
+    if (this.state === "challengeSelect") this.renderChallengeSelect();
+    const rows = await cloudTopScores(recordName, 20);
+    if (!this.leaderboardSheet || this.leaderboardSheet.recordName !== recordName) return;
+    this.leaderboardSheet = { recordName, rows, loading: false };
+    if (this.state === "challengeSelect") this.renderChallengeSelect();
+  }
+
+  private closeLeaderboardSheet(): void {
+    this.leaderboardSheet = null;
+    if (this.state === "challengeSelect") this.renderChallengeSelect();
+  }
+
+  private renderLeaderboardSheetHtml(): string {
+    const sheet = this.leaderboardSheet;
+    if (!sheet) return "";
+    const challenge = this.communityChallenges.find((c) => c.recordName === sheet.recordName);
+    const title = challenge ? challenge.name : "Leaderboard";
+    let body: string;
+    if (sheet.loading) {
+      body = `<div class="leaderboard-status">Loading…</div>`;
+    } else if (sheet.rows.length === 0) {
+      body = `<div class="leaderboard-status">No scores yet — be the first.</div>`;
+    } else {
+      body = `<ol class="leaderboard-rows">${sheet.rows.map((r, i) => {
+        const playLabel = `${r.attempts} ${r.attempts === 1 ? "play" : "plays"}`;
+        return `
+          <li class="leaderboard-row">
+            <span class="leaderboard-rank">${i + 1}</span>
+            <span class="leaderboard-name">
+              <span class="leaderboard-player">${escapeHtml(r.playerName)}</span>
+              <span class="leaderboard-attempts">${playLabel}</span>
+            </span>
+            <span class="leaderboard-score">${r.score}</span>
+          </li>
+        `;
+      }).join("")}</ol>`;
+    }
+    return `
+      <div class="modal-backdrop" data-action="close-leaderboard">
+        <div class="modal-sheet leaderboard-sheet" role="dialog" aria-label="Leaderboard">
+          <header class="modal-sheet-header">
+            <span>${escapeHtml(title)}</span>
+            <button type="button" class="modal-close" data-action="close-leaderboard" aria-label="Close">✕</button>
+          </header>
+          ${body}
+        </div>
+      </div>
+    `;
+  }
+
+  private openReportDialog(recordName: string): void {
+    this.reportSheet = { recordName, reason: "inappropriate_name", note: "" };
+    if (this.state === "challengeSelect") this.renderChallengeSelect();
+  }
+
+  private closeReportDialog(): void {
+    this.reportSheet = null;
+    if (this.state === "challengeSelect") this.renderChallengeSelect();
+  }
+
+  private renderReportSheetHtml(): string {
+    const sheet = this.reportSheet;
+    if (!sheet) return "";
+    const reasons: Array<{ id: ReportReason; label: string }> = [
+      { id: "inappropriate_name", label: "Inappropriate name" },
+      { id: "offensive_content", label: "Offensive content" },
+      { id: "unplayable", label: "Broken / unplayable" },
+      { id: "other", label: "Other" },
+    ];
+    const radios = reasons.map((r) => `
+      <label class="report-reason">
+        <input type="radio" name="report-reason" value="${r.id}" ${r.id === sheet.reason ? "checked" : ""} />
+        <span>${r.label}</span>
+      </label>
+    `).join("");
+    return `
+      <div class="modal-backdrop" data-action="close-report">
+        <div class="modal-sheet report-sheet" role="dialog" aria-label="Report challenge">
+          <header class="modal-sheet-header">
+            <span>Report challenge</span>
+            <button type="button" class="modal-close" data-action="close-report" aria-label="Close">✕</button>
+          </header>
+          <div class="report-body">
+            ${radios}
+            <textarea class="report-note" maxlength="240" rows="3" placeholder="Optional note (240 chars)" data-report-note>${escapeHtml(sheet.note)}</textarea>
+          </div>
+          <div class="report-actions">
+            <button type="button" class="play-btn report-submit" data-action="submit-report">SUBMIT</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  private async submitReport(): Promise<void> {
+    const sheet = this.reportSheet;
+    if (!sheet) return;
+    const noteEl = this.overlay.querySelector<HTMLTextAreaElement>("[data-report-note]");
+    const note = noteEl?.value ?? sheet.note;
+    const ok = await reportChallenge(sheet.recordName, sheet.reason, note);
+    this.reportSheet = null;
+    if (this.state === "challengeSelect") this.renderChallengeSelect();
+    if (ok) {
+      window.alert("Thanks — a moderator will review this challenge.");
+    } else {
+      window.alert("Couldn't submit the report. Try again later.");
+    }
   }
 
   private renderChallengeIntro(): void {
@@ -7137,6 +7826,17 @@ export class Game {
         else if (this.score >= custom.stars.one) stars = 1;
       }
       saveCustomChallengeRun(def.id, this.score, 1, stars);
+      // Community: if this is an installed challenge, fire the score off
+      // to the per-challenge leaderboard (best per player; submit only
+      // upserts when the new score is higher).
+      if (custom?.installedFrom) {
+        void submitCommunityScore(
+          custom.installedFrom,
+          getGameCenterDisplayName() ?? "Anonymous",
+          this.score,
+          1,
+        );
+      }
       this.state = "challengeComplete";
       this.setPauseButtonVisible(false);
       stopMusic();
@@ -7181,6 +7881,15 @@ export class Game {
     if (!def) return;
     if (isCustomChallenge(def)) {
       saveCustomChallengeRun(def.id, this.score, this.progress, 0);
+      const custom = getCustomChallenge(def.id);
+      if (custom?.installedFrom) {
+        void submitCommunityScore(
+          custom.installedFrom,
+          getGameCenterDisplayName() ?? "Anonymous",
+          this.score,
+          this.progress,
+        );
+      }
       return;
     }
     saveChallengeBest(def.id, this.score, this.progress);
@@ -8423,6 +9132,15 @@ function clampRound(v: number, min: number, max: number, step: number): number {
   // Avoid float jitter — snap to step's decimal precision.
   const decimals = Math.max(0, -Math.floor(Math.log10(step)));
   return Number(snapped.toFixed(decimals));
+}
+
+// Escape a string for safe inclusion inside a `[attr="..."]`
+// CSS attribute selector. Only `\` and `"` need escaping per the
+// CSS spec; we encode them as the spec's `\HEX ` form so any value
+// (including custom-challenge ids that contain `:` or hex digits)
+// can be looked up via querySelector without selector parse errors.
+function cssAttrEscape(s: string): string {
+  return s.replace(/["\\]/g, (ch) => `\\${ch.charCodeAt(0).toString(16)} `);
 }
 
 function escapeHtml(s: string): string {
