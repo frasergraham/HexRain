@@ -86,6 +86,13 @@ export class Player {
   partsByAxial: Map<string, Body>;
   comOffsetLocal: { x: number; y: number };
   inDanger = false;
+  // True while the next blue hit would end the run (i.e. the player has
+  // already taken a danger hit and the combo hasn't reset yet). Drives the
+  // "fatal window" red glow.
+  criticalDanger = false;
+  // Smoothed 0..1 mirror of criticalDanger so the glow eases in/out instead
+  // of snapping when the combo state flips.
+  criticalCharge = 0;
   invulnTimer = 0;
   pulse = 0;
 
@@ -355,6 +362,109 @@ export class Player {
     return removed;
   }
 
+  // Close interior gaps in the blob. After a flurry of sticky removals the
+  // remaining cells can leave a hole inside the silhouette (a 7-hex flower
+  // with the centre punched out is the classic case). For each empty cell
+  // surrounded by ≥4 filled neighbours, migrate the most peripheral cell
+  // that can be removed without breaking connectivity into the gap. Returns
+  // true if at least one swap happened so the caller can rebuild once.
+  compact(): boolean {
+    if (this.cells.length < 4) return false;
+    const cellSet = new Set(this.cells.map((c) => axialKey(c)));
+
+    const filledNeighbors = (a: Axial): number => {
+      let n = 0;
+      for (const m of neighborsOf(a)) if (cellSet.has(axialKey(m))) n++;
+      return n;
+    };
+
+    const findHoles = (): Array<{ cell: Axial; filled: number }> => {
+      const seen = new Set<string>();
+      const out: Array<{ cell: Axial; filled: number }> = [];
+      for (const c of this.cells) {
+        for (const n of neighborsOf(c)) {
+          const nk = axialKey(n);
+          if (cellSet.has(nk) || seen.has(nk)) continue;
+          seen.add(nk);
+          const f = filledNeighbors(n);
+          if (f >= 4) out.push({ cell: n, filled: f });
+        }
+      }
+      out.sort((a, b) => b.filled - a.filled);
+      return out;
+    };
+
+    const stillConnectedWithout = (skipKey: string): boolean => {
+      const total = cellSet.size - 1;
+      if (total <= 1) return true;
+      let start: Axial | null = null;
+      for (const k of cellSet) {
+        if (k === skipKey) continue;
+        const [q, r] = k.split(",").map(Number);
+        start = { q: q!, r: r! };
+        break;
+      }
+      if (!start) return true;
+      const visited = new Set<string>();
+      const stack: Axial[] = [start];
+      while (stack.length > 0) {
+        const c = stack.pop()!;
+        const ck = axialKey(c);
+        if (visited.has(ck)) continue;
+        visited.add(ck);
+        for (const nb of neighborsOf(c)) {
+          const nk = axialKey(nb);
+          if (nk === skipKey) continue;
+          if (cellSet.has(nk) && !visited.has(nk)) stack.push(nb);
+        }
+      }
+      return visited.size === total;
+    };
+
+    let changed = false;
+    for (let pass = 0; pass < 8; pass++) {
+      const holes = findHoles();
+      if (holes.length === 0) break;
+      let didSwap = false;
+      for (const h of holes) {
+        if (cellSet.has(axialKey(h.cell))) continue;
+        if (filledNeighbors(h.cell) < 4) continue;
+        // Pick the most peripheral cell whose removal doesn't disconnect the
+        // blob. Tie-break on distance from the hole so we visually pull from
+        // the far side rather than spinning a single neighbour in place.
+        const scored = this.cells
+          .map((c) => ({
+            cell: c,
+            nb: filledNeighbors(c),
+            dist: Math.hypot(c.q - h.cell.q, c.r - h.cell.r),
+          }))
+          .sort((a, b) => a.nb - b.nb || b.dist - a.dist);
+        let moved: Axial | null = null;
+        for (const s of scored) {
+          // Skip cells already neighbouring the hole — moving them would
+          // just shuffle the gap one step and not help.
+          if (s.dist <= 1.001) continue;
+          if (!stillConnectedWithout(axialKey(s.cell))) continue;
+          moved = s.cell;
+          break;
+        }
+        if (!moved) continue;
+        cellSet.delete(axialKey(moved));
+        cellSet.add(axialKey(h.cell));
+        this.cells = this.cells.filter(
+          (c) => !(c.q === moved!.q && c.r === moved!.r),
+        );
+        this.cells.push({ q: h.cell.q, r: h.cell.r });
+        changed = true;
+        didSwap = true;
+      }
+      if (!didSwap) break;
+    }
+
+    if (changed) this.rebuildBody();
+    return changed;
+  }
+
   private rebuildBody(): void {
     const oldBody = this.body;
     const angle = oldBody.angle;
@@ -404,6 +514,15 @@ export class Player {
   update(dt: number): void {
     this.pulse += dt * 5;
     if (this.invulnTimer > 0) this.invulnTimer = Math.max(0, this.invulnTimer - dt);
+    // criticalCharge: ramp up fast (snap into the warning) and decay slower
+    // (so the player can see the threat clearing rather than blinking off).
+    const target = this.criticalDanger ? 1 : 0;
+    const rate = this.criticalDanger ? 8 : 3;
+    if (this.criticalCharge < target) {
+      this.criticalCharge = Math.min(target, this.criticalCharge + dt * rate);
+    } else if (this.criticalCharge > target) {
+      this.criticalCharge = Math.max(target, this.criticalCharge - dt * rate);
+    }
   }
 
   draw(ctx: CanvasRenderingContext2D): void {
@@ -411,6 +530,7 @@ export class Player {
     const dangerPulse = (Math.sin(this.pulse) + 1) * 0.5;
     const invulnFlicker =
       this.invulnTimer > 0 ? (Math.sin(this.invulnTimer * 60) + 1) * 0.5 : 0;
+    const charge = this.criticalCharge;
 
     // Iterate the part bodies directly so positions reflect the actual
     // physics-driven world transforms (CoM-based, post-rotation).
@@ -432,15 +552,28 @@ export class Player {
       const cellIdx = i - 1;
       const darken = Math.min(0.45, cellIdx * 0.06);
       const grad = ctx.createLinearGradient(0, -sz, 0, sz);
-      grad.addColorStop(0, scaleColor("#9bf0c2", 1 - darken));
-      grad.addColorStop(1, scaleColor("#2ec27a", 1 - darken));
+      // While in the fatal window, lerp the green→red along with the pulse so
+      // the body reads as "hot": mostly red, throbbing brighter on the beat.
+      const tint = charge * (0.7 + dangerPulse * 0.3);
+      const top = lerpHex("#9bf0c2", "#ff6b7a", tint);
+      const bot = lerpHex("#2ec27a", "#a31c2c", tint);
+      grad.addColorStop(0, scaleColor(top, 1 - darken));
+      grad.addColorStop(1, scaleColor(bot, 1 - darken));
       ctx.fillStyle = grad;
+
+      if (charge > 0.01) {
+        ctx.shadowColor = `rgba(255, 70, 90, ${0.45 + 0.45 * dangerPulse * charge})`;
+        ctx.shadowBlur = (8 + 16 * dangerPulse) * charge;
+      }
       ctx.fill();
+      ctx.shadowBlur = 0;
 
       let strokeAlpha = 1;
-      if (this.inDanger) {
-        ctx.strokeStyle = `rgba(255, 92, 110, ${0.6 + dangerPulse * 0.4})`;
-        ctx.lineWidth = 2 + dangerPulse * 1.5;
+      if (this.inDanger || charge > 0.01) {
+        // Outline alone when warning, brighter + thicker pulse when critical.
+        const pulseGain = 0.4 + 0.6 * charge;
+        ctx.strokeStyle = `rgba(255, 92, 110, ${0.6 + dangerPulse * pulseGain})`;
+        ctx.lineWidth = 2 + dangerPulse * (1.5 + 2.0 * charge);
       } else {
         ctx.strokeStyle = "#1c4a30";
         ctx.lineWidth = 1.5;
@@ -463,4 +596,23 @@ function scaleColor(hex: string, factor: number): string {
   const g = Math.max(0, Math.min(255, Math.round(((n >> 8) & 0xff) * factor)));
   const b = Math.max(0, Math.min(255, Math.round((n & 0xff) * factor)));
   return `rgb(${r}, ${g}, ${b})`;
+}
+
+// Linear interpolate between two "#rrggbb" colours. Returns "#rrggbb" so the
+// result can be passed back through scaleColor.
+function lerpHex(a: string, b: string, t: number): string {
+  const k = Math.max(0, Math.min(1, t));
+  const na = parseInt(a.slice(1), 16);
+  const nb = parseInt(b.slice(1), 16);
+  const ar = (na >> 16) & 0xff;
+  const ag = (na >> 8) & 0xff;
+  const ab = na & 0xff;
+  const br = (nb >> 16) & 0xff;
+  const bg = (nb >> 8) & 0xff;
+  const bb = nb & 0xff;
+  const r = Math.round(ar + (br - ar) * k);
+  const g = Math.round(ag + (bg - ag) * k);
+  const bl = Math.round(ab + (bb - ab) * k);
+  const hex = ((r << 16) | (g << 8) | bl).toString(16).padStart(6, "0");
+  return `#${hex}`;
 }
