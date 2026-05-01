@@ -107,6 +107,11 @@ import { BlocksGuide } from "./ui/screens/blocksGuide";
 import { UnlockShop } from "./ui/screens/unlockShop";
 import { ChallengeIntro } from "./ui/screens/challengeIntro";
 import { ChallengeComplete } from "./ui/screens/challengeComplete";
+import { GameOver } from "./ui/screens/gameOver";
+import { LeaderboardSheet } from "./ui/screens/leaderboardSheet";
+import { ReportSheet } from "./ui/screens/reportSheet";
+import { SingleChallenge } from "./ui/screens/singleChallenge";
+import { IOS_SHARE_GLYPH_SVG } from "./ui/components/icons";
 
 // Build-time feature flag: while the IAP unlock flow is being verified
 // on TestFlight, set VITE_EDITOR_UNLOCKED=1 in .env.local (or any vite
@@ -5103,78 +5108,26 @@ export class Game {
   private renderSingleChallenge(): void {
     const sheet = this.singleChallenge;
     if (!sheet) return;
-    let body: string;
-    if (sheet.error) {
-      body = `<div class="challenge-community-status">${escapeHtml(sheet.error)}</div>`;
-    } else if (!sheet.challenge) {
-      body = `<div class="challenge-community-status">Loading shared challenge…</div>`;
-    } else {
-      const p = sheet.challenge;
-      const tint = difficultyTint(p.difficulty);
-      const hexes: string[] = [];
-      for (let i = 0; i < p.difficulty; i++) {
-        hexes.push(`<span class="challenge-card-hex" style="background:${tint};"></span>`);
-      }
-      const installed = !!listCustomChallenges().find((c) => c.installedFrom === p.recordName);
-      const upvoted = this.upvoteCache.has(p.recordName);
-      const showAuthedActions = isCloudKitAvailable();
-      const playOrInstall = installed
-        ? `<button type="button" class="community-card-btn community-card-btn-play" data-action="community-play" data-record-name="${escapeHtml(p.recordName)}">PLAY</button>`
-        : `<button type="button" class="community-card-btn community-card-btn-install" data-action="community-install" data-record-name="${escapeHtml(p.recordName)}">INSTALL</button>`;
-      const likeBtn = showAuthedActions
-        ? `<button type="button" class="community-card-icon-btn${upvoted ? " filled-like" : ""}" data-action="community-upvote" data-record-name="${escapeHtml(p.recordName)}" aria-label="Like">${upvoted ? "♥" : "♡"}</button>`
-        : "";
-      const reportBtn = showAuthedActions
-        ? `<button type="button" class="community-card-icon-btn" data-action="community-report" data-record-name="${escapeHtml(p.recordName)}" aria-label="Report">⚑</button>`
-        : "";
-      const shareBtn = `<button type="button" class="community-card-icon-btn" data-action="community-share" data-record-name="${escapeHtml(p.recordName)}" data-share-name="${escapeHtml(p.name)}" aria-label="Share">${IOS_SHARE_GLYPH_SVG}</button>`;
-      const installedBadge = installed
-        ? `<span class="challenge-card-installed">INSTALLED</span>`
-        : "";
-      const waveCount = p.waves.length;
-      const waveLabel = `${waveCount} ${waveCount === 1 ? "wave" : "waves"}`;
-      body = `
-        <div class="single-challenge-card">
-          <span class="challenge-card-id">SHARED CHALLENGE</span>
-          <h1 class="single-challenge-name">${escapeHtml(p.name)}</h1>
-          <span class="single-challenge-author">by ${escapeHtml(p.authorName)}</span>
-          <div class="single-challenge-hex-row">
-            <div class="challenge-card-hexes">${hexes.join("")}</div>
-            <span class="challenge-card-waves">${waveLabel}</span>
-          </div>
-          <div class="challenge-card-stats single-challenge-stats">
-            <span title="Installs">⬇ ${p.installCount}</span>
-            <span title="Plays">▶ ${p.playCount}</span>
-            <span title="Likes">♥ ${p.upvoteCount}</span>
-          </div>
-          ${installedBadge}
-          <div class="single-challenge-actions">
-            <div class="community-card-top-row">
-              ${playOrInstall}
-              <button type="button" class="community-card-btn community-card-btn-remix" data-action="community-remix" data-record-name="${escapeHtml(p.recordName)}">REMIX</button>
-            </div>
-            <div class="community-card-icon-row">
-              ${likeBtn}
-              <button type="button" class="community-card-icon-btn" data-action="community-leaderboard" data-record-name="${escapeHtml(p.recordName)}" aria-label="Leaderboard">🏆</button>
-              ${reportBtn}
-              ${shareBtn}
-            </div>
-          </div>
-        </div>
-      `;
-    }
-    this.overlay.innerHTML = `
-      <div class="single-challenge">
-        <div class="challenge-select-top">
-          <button type="button" class="challenge-back" data-action="single-back">← Back</button>
-          <span style="font-size:13px; letter-spacing:0.18em; text-transform:uppercase; color:#aab4dc;">Shared</span>
-          <span style="width:60px"></span>
-        </div>
-        ${body}
-      </div>
-      ${this.renderLeaderboardSheetHtml()}
-      ${this.renderReportSheetHtml()}
-    `;
+    const recordName = sheet.challenge?.recordName ?? sheet.recordName;
+    const lbSheet = this.leaderboardSheet;
+    const lbChallenge = lbSheet
+      ? this.communityChallenges.find((c) => c.recordName === lbSheet.recordName)
+      : undefined;
+    this.overlay.innerHTML = SingleChallenge.render({
+      challenge: sheet.challenge,
+      error: sheet.error,
+      installed: !!listCustomChallenges().find((c) => c.installedFrom === recordName),
+      upvoted: this.upvoteCache.has(recordName),
+      showAuthedActions: isCloudKitAvailable(),
+      leaderboardSheet: lbSheet ? {
+        title: lbChallenge ? lbChallenge.name : "Leaderboard",
+        loading: lbSheet.loading,
+        rows: lbSheet.rows,
+      } : null,
+      reportSheet: this.reportSheet
+        ? { reason: this.reportSheet.reason, note: this.reportSheet.note }
+        : null,
+    });
   }
 
   private async refreshCommunity(): Promise<void> {
@@ -5316,38 +5269,11 @@ export class Game {
     const sheet = this.leaderboardSheet;
     if (!sheet) return "";
     const challenge = this.communityChallenges.find((c) => c.recordName === sheet.recordName);
-    const title = challenge ? challenge.name : "Leaderboard";
-    let body: string;
-    if (sheet.loading) {
-      body = `<div class="leaderboard-status">Loading…</div>`;
-    } else if (sheet.rows.length === 0) {
-      body = `<div class="leaderboard-status">No scores yet — be the first.</div>`;
-    } else {
-      body = `<ol class="leaderboard-rows">${sheet.rows.map((r, i) => {
-        const playLabel = `${r.attempts} ${r.attempts === 1 ? "play" : "plays"}`;
-        return `
-          <li class="leaderboard-row">
-            <span class="leaderboard-rank">${i + 1}</span>
-            <span class="leaderboard-name">
-              <span class="leaderboard-player">${escapeHtml(r.playerName)}</span>
-              <span class="leaderboard-attempts">${playLabel}</span>
-            </span>
-            <span class="leaderboard-score">${r.score}</span>
-          </li>
-        `;
-      }).join("")}</ol>`;
-    }
-    return `
-      <div class="modal-backdrop" data-action="close-leaderboard">
-        <div class="modal-sheet leaderboard-sheet" role="dialog" aria-label="Leaderboard">
-          <header class="modal-sheet-header">
-            <span>${escapeHtml(title)}</span>
-            <button type="button" class="modal-close" data-action="close-leaderboard" aria-label="Close">✕</button>
-          </header>
-          ${body}
-        </div>
-      </div>
-    `;
+    return LeaderboardSheet.render({
+      title: challenge ? challenge.name : "Leaderboard",
+      loading: sheet.loading,
+      rows: sheet.rows,
+    });
   }
 
   private openReportDialog(recordName: string): void {
@@ -5361,37 +5287,7 @@ export class Game {
   }
 
   private renderReportSheetHtml(): string {
-    const sheet = this.reportSheet;
-    if (!sheet) return "";
-    const reasons: Array<{ id: ReportReason; label: string }> = [
-      { id: "inappropriate_name", label: "Inappropriate name" },
-      { id: "offensive_content", label: "Offensive content" },
-      { id: "unplayable", label: "Broken / unplayable" },
-      { id: "other", label: "Other" },
-    ];
-    const radios = reasons.map((r) => `
-      <label class="report-reason">
-        <input type="radio" name="report-reason" value="${r.id}" ${r.id === sheet.reason ? "checked" : ""} />
-        <span>${r.label}</span>
-      </label>
-    `).join("");
-    return `
-      <div class="modal-backdrop" data-action="close-report">
-        <div class="modal-sheet report-sheet" role="dialog" aria-label="Report challenge">
-          <header class="modal-sheet-header">
-            <span>Report challenge</span>
-            <button type="button" class="modal-close" data-action="close-report" aria-label="Close">✕</button>
-          </header>
-          <div class="report-body">
-            ${radios}
-            <textarea class="report-note" maxlength="240" rows="3" placeholder="Optional note (240 chars)" data-report-note>${escapeHtml(sheet.note)}</textarea>
-          </div>
-          <div class="report-actions">
-            <button type="button" class="play-btn report-submit" data-action="submit-report">SUBMIT</button>
-          </div>
-        </div>
-      </div>
-    `;
+    return ReportSheet.render(this.reportSheet);
   }
 
   private async submitReport(): Promise<void> {
@@ -5648,51 +5544,28 @@ export class Game {
     if (musicBtn) musicBtn.setAttribute("aria-pressed", String(music));
   }
 
-  private difficultyButtonsHtml(): string {
-    return `
-      <div id="difficultyButtons" class="difficulty-buttons" role="group" aria-label="Difficulty">
-        <button type="button" data-difficulty="easy">EASY</button>
-        <button type="button" data-difficulty="medium">MEDIUM</button>
-        <button type="button" data-difficulty="hard">HARD</button>
-        <button type="button" data-difficulty="hardcore">PAINFUL</button>
-      </div>
-    `;
-  }
+  // difficultyButtonsHtml inlined into the GameOver screen template.
 
   private renderGameOver(): void {
     if (this.gameMode === "challenge" && this.activeChallenge) {
       const def = this.activeChallenge;
-      const progress = loadChallengeProgress();
-      const best = progress.best[def.id] ?? 0;
-      const pct = Math.max(0, Math.min(100, Math.round(this.progress * 100)));
-      const pctCls = pct >= 100 ? "challenge-pct full" : "challenge-pct partial";
-      this.overlay.innerHTML = `
-        <div class="challenge-gameover">
-          <h1>GAME OVER</h1>
-          <p class="tagline">${escapeHtml(def.name)} · ${def.id}</p>
-          <div class="${pctCls}">${pct}%</div>
-          <p class="tagline">Score ${this.score} · Best ${best}</p>
-          <button type="button" class="play-btn" data-action="play">RETRY</button>
-          <button type="button" class="challenge-back" data-action="challenge-back">Back to challenges</button>
-          <button type="button" class="challenge-back" data-action="challenge-menu">Main menu</button>
-        </div>
-      `;
+      const best = loadChallengeProgress().best[def.id] ?? 0;
+      this.overlay.innerHTML = GameOver.render({
+        mode: "challenge",
+        score: this.score,
+        best,
+        challengeName: def.name,
+        challengeId: def.id,
+        challengeProgress: this.progress,
+      });
       this.overlay.classList.remove("hidden");
       return;
     }
-    this.overlay.innerHTML = `
-      <h1>GAME OVER</h1>
-      <p class="tagline">Score ${this.score} &middot; Best ${this.best}</p>
-      <div class="play-group">
-        ${this.difficultyButtonsHtml()}
-        <button type="button" class="play-btn" data-action="play">PLAY AGAIN</button>
-      </div>
-      <button type="button" class="challenge-back" data-action="challenge-menu">Main menu</button>
-      <section class="achievements">
-        <h2>Achievements <span id="achievementCount" class="achievement-count" aria-live="polite"></span></h2>
-        <div id="achievementBadges" class="achievement-badges" aria-label="Earned achievements"></div>
-      </section>
-    `;
+    this.overlay.innerHTML = GameOver.render({
+      mode: "endless",
+      score: this.score,
+      best: this.best,
+    });
     this.overlay.classList.remove("hidden");
     this.renderAchievementBadges();
     this.refreshDifficultyButtons();
@@ -9158,9 +9031,7 @@ function helpTipHtml(key: string, override?: string): string {
 
 // Hard cap on rows in the Custom Wave editor. Each row maps to one slot
 // token in the DSL output (skipped rows emit "000").
-// iOS-style share glyph (square with up arrow). Inline SVG so it
-// renders identically across platforms and respects currentColor.
-const IOS_SHARE_GLYPH_SVG = `<svg viewBox="0 0 16 22" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" width="14" height="14"><path d="M8 0L3.5 4.5l1.06 1.06L7.25 2.87V14h1.5V2.87l2.69 2.69L12.5 4.5 8 0z" fill="currentColor"/><path d="M2 8H1a1 1 0 00-1 1v12a1 1 0 001 1h14a1 1 0 001-1V9a1 1 0 00-1-1h-1v1.5h1V20.5H1.5V9.5h1V8z" fill="currentColor"/></svg>`;
+// IOS_SHARE_GLYPH_SVG moved to src/ui/components/icons.ts in Phase 2.
 
 const CUSTOM_WAVE_LEN = 30;
 
