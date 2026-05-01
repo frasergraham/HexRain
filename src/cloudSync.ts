@@ -52,6 +52,7 @@ import {
   type CustomChallengeStars,
 } from "./customChallenges";
 import { checkName, type ModerationResult } from "./moderation";
+import { hashSeed } from "./rng";
 
 // ---------- Identity ------------------------------------------------------
 
@@ -553,16 +554,12 @@ function makePublishedRecordName(authorId: string, sourceCustomId: string): stri
   return `pub-${shortHash(authorId)}-${shortHash(sourceCustomId)}`;
 }
 
-// Quick non-cryptographic hash → short hex string. CloudKit record
+// Quick non-cryptographic hash → short base-36 string. CloudKit record
 // names allow [A-Za-z0-9_-] up to 255 chars; we just need stable
-// readable per-(author, custom) identifiers.
+// readable per-(author, custom) identifiers. Uses the canonical FNV-1a
+// hash in rng.ts so we don't carry three copies of it across the repo.
 function shortHash(input: string): string {
-  let h = 2166136261 >>> 0;
-  for (let i = 0; i < input.length; i++) {
-    h ^= input.charCodeAt(i);
-    h = Math.imul(h, 16777619) >>> 0;
-  }
-  return h.toString(36);
+  return hashSeed(input).toString(36);
 }
 
 function customChallengeToFields(c: CustomChallenge): Record<string, CloudKitField> {

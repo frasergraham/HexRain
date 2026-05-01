@@ -147,23 +147,7 @@ export function buildPolyhexShape(n: number, rng: () => number = Math.random): A
   return cells;
 }
 
-// Tiny seeded PRNG (mulberry32) — deterministic from a 32-bit seed so the
-// same achievement set always produces the same polyhex layout.
-export function mulberry32(seed: number): () => number {
-  let s = seed >>> 0;
-  return () => {
-    s = (s + 0x6d2b79f5) | 0;
-    let t = Math.imul(s ^ (s >>> 15), 1 | s);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-export function hashString(s: string): number {
-  let h = 2166136261 >>> 0;
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return h >>> 0;
-}
+// Note: mulberry32 + hashString used to live here as duplicates of
+// rng.ts:mulberry32 / rng.ts:hashSeed. They were proven byte-identical
+// in tests/determinism.test.ts and removed in Phase 1.1 of the
+// refactor. Import from "./rng" instead.
