@@ -88,6 +88,76 @@ to refresh the file before running `purge-stale-scores`.
 The `recordName` in each command is shown in the `list-reports` output
 (it starts with `pub-`).
 
+## Endless-mode balance overrides
+
+Endless-mode balance is tunable from CloudKit without an app release.
+Five scopes: per-difficulty (`easy`, `medium`, `hard`, `hardcore`) and
+a single `global` record for tier weights, fall velocity, late ramp,
+spawn intervals, swarm, and geometry score gates. Records are pulled
+at cold launch and applied via a snapshot captured at run start, so
+mid-run pushes don't surprise the player — the next run picks them up.
+
+### Authoring an override JSON
+
+Per-difficulty file (overrides one `DifficultyConfig`):
+
+```json
+{
+  "scope": "hardcore",
+  "note": "Heals were too rare — try a touch more sticky on PAINFUL.",
+  "config": {
+    "stickyMul": 0.06,
+    "helpfulMul": 0.07
+  }
+}
+```
+
+Global file (overrides one or more `GlobalEndlessTunables`):
+
+```json
+{
+  "scope": "global",
+  "note": "Pull the late-game ramp ceiling down.",
+  "global": {
+    "lateRampCap": 1.4
+  }
+}
+```
+
+A difficulty record must set `config` (not `global`); the global record
+must set `global` (not `config`). Either field may be omitted to ship
+a no-op record. See `src/endlessBalance.ts` for the full field list
+and validation ranges.
+
+### Push workflow
+
+```sh
+# Preview the effect locally first — the simulator accepts the same
+# shape via its --config flag (extends with byDifficulty fan-out).
+npx tsx scripts/simulate.ts --audit --config /tmp/preview.json
+
+# Upload the override as draft (status="draft"), then flip it live.
+node scripts/moderator.mjs upload-endless-balance ./hardcore-tweak.json
+node scripts/moderator.mjs mark-endless-live hardcore
+
+# Or upload and publish in one shot.
+node scripts/moderator.mjs upload-endless-balance ./hardcore-tweak.json --mark-live
+
+# Inspect what's live across all scopes.
+node scripts/moderator.mjs list-endless-balance
+
+# Roll back — clients clear their local cache on next pull.
+node scripts/moderator.mjs retire-endless hardcore
+
+# Hard-delete once all clients have rolled.
+node scripts/moderator.mjs delete-endless-balance hardcore
+```
+
+Validation: clients drop a payload whose fields fall outside the ranges
+documented in `src/endlessBalance.ts:validatePayload`. The moderator
+script does a minimum-viability check (`scope` valid, `config`/`global`
+field exclusivity) but defers full validation to the client.
+
 ## What players see when you hide
 
 The community list filters on `status == "approved"`, so a hidden

@@ -346,8 +346,18 @@ export function getEffectiveGlobalTunables(): GlobalEndlessTunables {
 // Bundle the per-difficulty config + global tunables into the snapshot
 // shape the live game holds for the duration of a run.
 export function snapshotEndlessBalance(d: Difficulty): EndlessBalanceSnapshot {
-  const config = getEffectiveDifficultyConfig(d);
-  const tunables = getEffectiveGlobalTunables();
+  return buildSnapshot(d, getEffectiveDifficultyConfig(d), getEffectiveGlobalTunables());
+}
+
+// Construct a snapshot from explicit inputs. Used by the live game's
+// snapshotEndlessBalance() (which feeds in the localStorage-merged
+// values) and by the offline simulator (which feeds in synthetic
+// overrides from --config). Pure: no I/O.
+export function buildSnapshot(
+  d: Difficulty,
+  config: DifficultyConfig,
+  tunables: GlobalEndlessTunables,
+): EndlessBalanceSnapshot {
   return Object.freeze({
     difficulty: d,
     config,
@@ -368,4 +378,18 @@ export function snapshotEndlessBalance(d: Difficulty): EndlessBalanceSnapshot {
       ramp: tunables.spawnIntervalRamp,
     }),
   });
+}
+
+// Construct a snapshot from raw partial overrides, no localStorage
+// involved. The simulator uses this to thread a synthetic
+// EndlessBalanceOverride payload through runEndless without having
+// to fake out the storage layer.
+export function snapshotFromOverrides(
+  d: Difficulty,
+  configOverride: Partial<DifficultyConfig> = {},
+  globalOverride: Partial<GlobalEndlessTunables> = {},
+): EndlessBalanceSnapshot {
+  const config: DifficultyConfig = { ...DIFFICULTY_CONFIG[d], ...configOverride };
+  const tunables: GlobalEndlessTunables = { ...DEFAULT_GLOBAL_TUNABLES, ...globalOverride };
+  return buildSnapshot(d, config, tunables);
 }

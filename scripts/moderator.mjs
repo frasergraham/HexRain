@@ -37,6 +37,17 @@
 //   delete-override <challengeId>            Hard-delete the record (preferred way to undo an override
 //                                            once all clients have pulled the retired status, or for cleanup)
 //
+// Endless-balance overrides (post-ship endless-mode balance tweaks):
+//   list-endless-balance                     List all EndlessBalanceOverride records
+//   upload-endless-balance <file> [--mark-live] [--note <text>]
+//                                            Upload an endless-balance override for one scope
+//                                            (easy|medium|hard|hardcore|global). File contains
+//                                            { scope, config? | global?, note? }.
+//                                            Status defaults to "draft" unless --mark-live.
+//   mark-endless-live <scope>                Flip status to "live" so clients pull on next cold launch
+//   retire-endless <scope>                   Flip status to "retired" so clients clear it on next pull
+//   delete-endless-balance <scope>           Hard-delete the record
+//
 // Environment overrides (rarely needed):
 //   HEXRAIN_MOD_TOKEN_PATH                   Custom token JSON path
 //   HEXRAIN_MOD_ENV                          "development" (default) or "production"
@@ -358,6 +369,156 @@ async function deleteOverride(cfg, challengeId) {
   console.log(`${recordName} → deleted`);
 }
 
+// ---------- Endless-balance overrides ------------------------------------
+
+const ENDLESS_BALANCE_RECORD_TYPE = "EndlessBalanceOverride";
+const ENDLESS_BALANCE_SCOPES = ["easy", "medium", "hard", "hardcore", "global"];
+
+function endlessBalanceRecordName(scope) {
+  return `endlessBalance-${scope}`;
+}
+
+function readEndlessBalanceFile(filePath) {
+  if (!fs.existsSync(filePath)) {
+    console.error(`File not found: ${filePath}`);
+    process.exit(1);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch (err) {
+    console.error(`Invalid JSON in ${filePath}: ${err.message}`);
+    process.exit(1);
+  }
+  const errs = [];
+  if (typeof parsed.scope !== "string" || !ENDLESS_BALANCE_SCOPES.includes(parsed.scope)) {
+    errs.push(`scope missing or invalid (must be one of: ${ENDLESS_BALANCE_SCOPES.join(", ")})`);
+  }
+  if (parsed.scope === "global") {
+    if (parsed.config != null) errs.push("global scope must not set config");
+    if (parsed.global != null && (typeof parsed.global !== "object" || Array.isArray(parsed.global))) {
+      errs.push("global must be a partial GlobalEndlessTunables object");
+    }
+  } else if (ENDLESS_BALANCE_SCOPES.includes(parsed.scope)) {
+    if (parsed.global != null) errs.push("difficulty scope must not set global");
+    if (parsed.config != null && (typeof parsed.config !== "object" || Array.isArray(parsed.config))) {
+      errs.push("config must be a partial DifficultyConfig object");
+    }
+  }
+  if (errs.length > 0) {
+    console.error(`Invalid endless-balance file ${filePath}: ${errs.join(", ")}`);
+    process.exit(1);
+  }
+  return parsed;
+}
+
+async function listEndlessBalance(cfg) {
+  const recs = await queryAll(cfg, ENDLESS_BALANCE_RECORD_TYPE);
+  if (recs.length === 0) {
+    console.log("No EndlessBalanceOverride records.");
+    return;
+  }
+  recs.sort((a, b) => {
+    const ai = a.fields?.scope?.value ?? "";
+    const bi = b.fields?.scope?.value ?? "";
+    return ai.localeCompare(bi);
+  });
+  console.log("scope     status   v   updatedAt                fields");
+  console.log("--------  -------  --  -----------------------  ----------------------------------------");
+  for (const r of recs) {
+    const scope = r.fields?.scope?.value ?? "?";
+    const status = r.fields?.status?.value ?? "?";
+    const version = r.fields?.version?.value ?? "?";
+    const updated = r.fields?.updatedAt?.value
+      ? new Date(r.fields.updatedAt.value).toISOString()
+      : "?";
+    const configRaw = r.fields?.config?.value;
+    const globalRaw = r.fields?.global?.value;
+    let fieldsSummary = "";
+    try {
+      if (configRaw) {
+        const keys = Object.keys(JSON.parse(configRaw));
+        fieldsSummary = `config: ${keys.join(", ")}`;
+      } else if (globalRaw) {
+        const keys = Object.keys(JSON.parse(globalRaw));
+        fieldsSummary = `global: ${keys.join(", ")}`;
+      }
+    } catch {
+      fieldsSummary = "(unparseable)";
+    }
+    console.log(
+      `${scope.padEnd(8)}  ${String(status).padEnd(7)}  ${String(version).padStart(2)}  ${updated.padEnd(23)}  ${fieldsSummary}`,
+    );
+  }
+}
+
+async function uploadEndlessBalance(cfg, args) {
+  let filePath = null;
+  let markLive = false;
+  let note = "";
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--mark-live") markLive = true;
+    else if (a === "--note") { note = args[i + 1] ?? ""; i += 1; }
+    else if (!a.startsWith("--") && filePath === null) filePath = a;
+  }
+  if (!filePath) {
+    console.error("Usage: upload-endless-balance <file> [--mark-live] [--note <text>]");
+    process.exit(1);
+  }
+
+  const payload = readEndlessBalanceFile(filePath);
+  const recordName = endlessBalanceRecordName(payload.scope);
+  const existing = await fetchOne(cfg, recordName);
+  const prevVersion = existing?.fields?.version?.value ?? 0;
+  const version = prevVersion + 1;
+  const now = Date.now();
+  const fields = {
+    scope: payload.scope,
+    config: payload.config ? JSON.stringify(payload.config) : "",
+    global: payload.global ? JSON.stringify(payload.global) : "",
+    version,
+    status: markLive ? "live" : (existing?.fields?.status?.value ?? "draft"),
+    updatedAt: now,
+    note: note || (payload.note ?? ""),
+  };
+  await modify(cfg, recordName, fields, ENDLESS_BALANCE_RECORD_TYPE, existing?.recordChangeTag);
+  const liveHint = markLive || fields.status === "live"
+    ? ""
+    : ` (run "mark-endless-live ${payload.scope}" to publish)`;
+  console.log(`${recordName} → v${version} status=${fields.status}${liveHint}`);
+}
+
+async function setEndlessBalanceStatus(cfg, scope, status) {
+  if (!ENDLESS_BALANCE_SCOPES.includes(scope)) {
+    console.error(`Unknown scope: ${scope} (expected: ${ENDLESS_BALANCE_SCOPES.join(", ")})`);
+    process.exit(1);
+  }
+  const recordName = endlessBalanceRecordName(scope);
+  const rec = await fetchOne(cfg, recordName);
+  if (!rec) {
+    console.error(`Not found: ${recordName}`);
+    process.exit(1);
+  }
+  await modify(cfg, recordName, { status, updatedAt: Date.now() }, rec.recordType, rec.recordChangeTag);
+  console.log(`${recordName} → status=${status}`);
+}
+
+async function deleteEndlessBalance(cfg, scope) {
+  if (!ENDLESS_BALANCE_SCOPES.includes(scope)) {
+    console.error(`Unknown scope: ${scope} (expected: ${ENDLESS_BALANCE_SCOPES.join(", ")})`);
+    process.exit(1);
+  }
+  const recordName = endlessBalanceRecordName(scope);
+  const rec = await fetchOne(cfg, recordName);
+  if (!rec) {
+    console.error(`Not found: ${recordName}`);
+    process.exit(1);
+  }
+  await deleteOne(cfg, recordName);
+  console.log(`${recordName} → deleted`);
+}
+
 // ---------- Score migration / purge --------------------------------------
 
 const SCORE_RECORD_TYPE = "Score";
@@ -569,6 +730,8 @@ async function main() {
     console.error("Usage: moderator.mjs <command> [args]");
     console.error("  Community: list-reports, hide, unhide, recount-upvotes, recount-plays");
     console.error("  Overrides: list-overrides, upload-override, mark-live, retire-override, delete-override");
+    console.error("  Endless:   list-endless-balance, upload-endless-balance, mark-endless-live,");
+    console.error("             retire-endless, delete-endless-balance");
     console.error("  Scores:    backfill-score-keys, purge-stale-scores");
     process.exit(1);
   }
@@ -607,6 +770,22 @@ async function main() {
     const id = rest[0];
     if (!id) { console.error("Usage: delete-override <challengeId>"); process.exit(1); }
     await deleteOverride(cfg, id);
+  } else if (cmd === "list-endless-balance") {
+    await listEndlessBalance(cfg);
+  } else if (cmd === "upload-endless-balance") {
+    await uploadEndlessBalance(cfg, rest);
+  } else if (cmd === "mark-endless-live") {
+    const scope = rest[0];
+    if (!scope) { console.error("Usage: mark-endless-live <scope>"); process.exit(1); }
+    await setEndlessBalanceStatus(cfg, scope, "live");
+  } else if (cmd === "retire-endless") {
+    const scope = rest[0];
+    if (!scope) { console.error("Usage: retire-endless <scope>"); process.exit(1); }
+    await setEndlessBalanceStatus(cfg, scope, "retired");
+  } else if (cmd === "delete-endless-balance") {
+    const scope = rest[0];
+    if (!scope) { console.error("Usage: delete-endless-balance <scope>"); process.exit(1); }
+    await deleteEndlessBalance(cfg, scope);
   } else if (cmd === "backfill-score-keys") {
     await backfillScoreKeys(cfg, rest);
   } else if (cmd === "purge-stale-scores") {
