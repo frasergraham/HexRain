@@ -41,6 +41,12 @@ export const STORAGE_KEYS = {
   // hand-authored challenges can be tweaked without an app update.
   officialOverrides: "hexrain.officialOverrides.v1",
 
+  // Cloud-delivered overrides for endless-mode balance (endlessBalance.ts).
+  // Pulled from CloudKit EndlessBalanceOverride records on cold launch and
+  // applied on top of DIFFICULTY_CONFIG + global endless tunables at run
+  // start, so endless balance can be tuned without an app update.
+  endlessBalance: "hexrain.endlessBalance.v1",
+
   // First-appearance hints (game.ts).
   seenHints: "hexrain.seenHints",
   rotateTutorialShown: "hexrain.rotateTutorialShown",

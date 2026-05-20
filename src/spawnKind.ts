@@ -57,12 +57,18 @@ export interface DifficultyConfig {
   dangerSize: number;
 }
 
+// Rebalanced 2026-05: combined normal:special ratios shift from
+// 2:1 / 2.8:1 / 3.6:1 / 3.9:1 to 6:1 / 7.5:1 / 9:1 / ~10:1.
+// Sticky + helpful muls drop sharply with difficulty; challenge
+// (fast + big) mildly rises — they're opt-in risk/reward, not buffs.
+// PAINFUL re-enables slow + tiny at very low share and bumps
+// dangerSize 3 → 5 so the rarer heals have room to land.
 export const DIFFICULTY_CONFIG: Record<Difficulty, DifficultyConfig> = {
   easy: {
     fallSpeedMul: 0.8,
     spawnIntervalMul: 1.25,
-    stickyMul: 1.5,
-    helpfulMul: 1.32,
+    stickyMul: 0.40,
+    helpfulMul: 0.35,
     challengeMul: 1.0,
     tinyMinScore: 300,
     bigMinScore: 300,
@@ -75,9 +81,9 @@ export const DIFFICULTY_CONFIG: Record<Difficulty, DifficultyConfig> = {
   medium: {
     fallSpeedMul: 1.0,
     spawnIntervalMul: 1.0,
-    stickyMul: 1.0,
-    helpfulMul: 1.0,
-    challengeMul: 1.0,
+    stickyMul: 0.20,
+    helpfulMul: 0.20,
+    challengeMul: 1.1,
     tinyMinScore: 300,
     bigMinScore: 300,
     effectDurationMul: 1.0,
@@ -89,9 +95,9 @@ export const DIFFICULTY_CONFIG: Record<Difficulty, DifficultyConfig> = {
   hard: {
     fallSpeedMul: 1.35,
     spawnIntervalMul: 0.85,
-    stickyMul: 0.6,
-    helpfulMul: 0.84,
-    challengeMul: 1.0,
+    stickyMul: 0.08,
+    helpfulMul: 0.12,
+    challengeMul: 1.2,
     tinyMinScore: 0,
     bigMinScore: 0,
     effectDurationMul: 0.8,
@@ -103,13 +109,9 @@ export const DIFFICULTY_CONFIG: Record<Difficulty, DifficultyConfig> = {
   hardcore: {
     fallSpeedMul: 1.5,
     spawnIntervalMul: 0.75,
-    stickyMul: 0.5,
-    helpfulMul: 0.53,
-    challengeMul: 1.0,
-    // PAINFUL drops slow + tiny entirely. Slow softens the difficulty
-    // (counter to the mode's intent) and tiny would let the player
-    // out-shrink the dangerSize:3 ceiling.
-    helpfulExclude: ["slow", "tiny"],
+    stickyMul: 0.04,
+    helpfulMul: 0.05,
+    challengeMul: 1.2,
     effectDurationMul: 1.0,
     // Both challenge-tier bonuses (fast + big) run long on hardcore —
     // they're risk/reward levers and longer duration makes the bonus
@@ -121,7 +123,7 @@ export const DIFFICULTY_CONFIG: Record<Difficulty, DifficultyConfig> = {
     narrowingScore: 100,
     zigzagScore: 200,
     narrowScore: 400,
-    dangerSize: 3,
+    dangerSize: 5,
   },
 };
 
@@ -243,6 +245,22 @@ export function pickChallengeKind(
   return pool[Math.floor(rng() * pool.length)];
 }
 
+// Tier weight bundle. The defaults are the module constants
+// (SPAWN_*_TIER_WEIGHT); the live game passes the snapshot's
+// overridden weights so a CloudKit push can re-tune the tier mix
+// without a build.
+export interface TierWeights {
+  sticky: number;
+  helpful: number;
+  challenge: number;
+}
+
+export const DEFAULT_TIER_WEIGHTS: TierWeights = {
+  sticky: SPAWN_STICKY_TIER_WEIGHT,
+  helpful: SPAWN_HELPFUL_TIER_WEIGHT,
+  challenge: SPAWN_CHALLENGE_TIER_WEIGHT,
+};
+
 // Full tier-dispatch. Returns the cluster kind for a single non-swarm
 // spawn at the given score under the given difficulty, given an rng
 // source. Swarm spawns bypass this and are decided by the caller.
@@ -251,9 +269,22 @@ export function pickKind(
   score: number,
   rng: Random,
 ): ClusterKind {
-  const stickyEnd = SPAWN_STICKY_TIER_WEIGHT * cfg.stickyMul;
-  const helpfulEnd = stickyEnd + SPAWN_HELPFUL_TIER_WEIGHT * cfg.helpfulMul;
-  const challengeEnd = helpfulEnd + SPAWN_CHALLENGE_TIER_WEIGHT * cfg.challengeMul;
+  return pickKindWithWeights(cfg, score, rng, DEFAULT_TIER_WEIGHTS);
+}
+
+// Same as pickKind, but with an explicit tier-weight bundle so the
+// live game can apply a CloudKit-delivered override of the base
+// tier weights. The sim + tests stay on pickKind (which uses the
+// module constants) — overrides are a runtime-only concept.
+export function pickKindWithWeights(
+  cfg: DifficultyConfig,
+  score: number,
+  rng: Random,
+  weights: TierWeights,
+): ClusterKind {
+  const stickyEnd = weights.sticky * cfg.stickyMul;
+  const helpfulEnd = stickyEnd + weights.helpful * cfg.helpfulMul;
+  const challengeEnd = helpfulEnd + weights.challenge * cfg.challengeMul;
   const r = rng();
   if (r < stickyEnd) {
     if (score >= STICKY_MIN_SCORE) return "sticky";
