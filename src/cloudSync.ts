@@ -492,23 +492,30 @@ function recordToOverridePayload(rec: CloudKitRecord): OfficialChallengeOverride
 // configured, no iCloud account required.
 export async function pullEndlessBalanceConfig(): Promise<void> {
   if (!isCommunityReadable()) return;
-  const result = await queryRecords({
-    db: "public",
-    recordType: ENDLESS_BALANCE_RECORD_TYPE,
-    limit: 10,
-  });
-  for (const rec of result.records) {
-    const status = stringField(rec.fields["status"]) ?? "draft";
-    const scope = stringField(rec.fields["scope"]);
-    if (!scope || !isValidEndlessScope(scope)) continue;
-    if (status === "retired") {
-      clearEndlessOverride(scope);
-      continue;
+  // Best-effort: a CloudKit hiccup or a missing record type (schema
+  // not yet deployed) must not reject Promise.all in main.ts and
+  // block subscribeToInstalledUpdates. Log + carry on.
+  try {
+    const result = await queryRecords({
+      db: "public",
+      recordType: ENDLESS_BALANCE_RECORD_TYPE,
+      limit: 10,
+    });
+    for (const rec of result.records) {
+      const status = stringField(rec.fields["status"]) ?? "draft";
+      const scope = stringField(rec.fields["scope"]);
+      if (!scope || !isValidEndlessScope(scope)) continue;
+      if (status === "retired") {
+        clearEndlessOverride(scope);
+        continue;
+      }
+      if (status !== "live") continue;
+      const payload = recordToEndlessPayload(rec, scope);
+      if (!payload) continue;
+      upsertEndlessOverride(payload);
     }
-    if (status !== "live") continue;
-    const payload = recordToEndlessPayload(rec, scope);
-    if (!payload) continue;
-    upsertEndlessOverride(payload);
+  } catch (err) {
+    console.warn("endlessBalance: pull failed", err);
   }
 }
 
@@ -521,7 +528,15 @@ function recordToEndlessPayload(
   scope: EndlessOverrideScope,
 ): EndlessOverridePayload | null {
   const version = numberField(rec.fields["version"]) ?? 1;
-  const updatedAt = numberField(rec.fields["updatedAt"]) ?? rec.modifiedAt ?? Date.now();
+  // Refuse to synthesise a timestamp: falling back to Date.now() means
+  // the freshly-minted "now" beats whatever's in localStorage on every
+  // cold launch, triggering wasted upserts. If the record genuinely
+  // lacks both updatedAt and modifiedAt the publisher messed up — skip.
+  const updatedAt = numberField(rec.fields["updatedAt"]) ?? rec.modifiedAt;
+  if (typeof updatedAt !== "number" || !Number.isFinite(updatedAt)) {
+    console.warn(`endlessBalance: ${rec.recordName} missing updatedAt + modifiedAt, skipping`);
+    return null;
+  }
   const note = stringField(rec.fields["note"]) ?? undefined;
 
   const configRaw = stringField(rec.fields["config"]);

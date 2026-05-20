@@ -238,6 +238,23 @@ function validateGlobal(global: unknown, errors: string[]): void {
       errors.push(`global.${String(key)}: out of range [${lo}, ${hi}] (got ${String(g[key])})`);
     }
   }
+
+  // Tier weights sum must leave room for the Normal residual. If
+  // sticky+helpful+challenge > 1, pickKindWithWeights never picks
+  // Normal — the override silently breaks the spawn mix. Validate
+  // against the post-merge sum (override fields fall back to the
+  // baked defaults) so partial overrides are checked correctly.
+  const effSticky = g.stickyTierWeight ?? SPAWN_STICKY_TIER_WEIGHT;
+  const effHelpful = g.helpfulTierWeight ?? SPAWN_HELPFUL_TIER_WEIGHT;
+  const effChallenge = g.challengeTierWeight ?? SPAWN_CHALLENGE_TIER_WEIGHT;
+  // 1e-9 tolerance for IEEE-754 rounding on harmless near-1 sums.
+  if (effSticky + effHelpful + effChallenge > 1 + 1e-9) {
+    const sum = (effSticky + effHelpful + effChallenge).toFixed(4);
+    errors.push(
+      `tier weights sum > 1 (would eliminate Normal): ` +
+      `sticky=${effSticky} helpful=${effHelpful} challenge=${effChallenge} sum=${sum}`,
+    );
+  }
 }
 
 export function validatePayload(p: unknown): ValidatePayloadResult {
