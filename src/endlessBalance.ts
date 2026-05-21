@@ -167,6 +167,10 @@ function validateConfig(config: unknown, errors: string[]): void {
     return;
   }
   const c = config as Partial<DifficultyConfig>;
+  // stickyMul/helpfulMul/challengeMul allow 0 deliberately: an emergency
+  // override can zero out an entire tier (e.g. "exploit involving coins,
+  // kill all coin spawns") without an app release. Baked defaults are
+  // never that low; intentional zero is a moderator decision.
   const numericFields: Array<[keyof DifficultyConfig, number, number]> = [
     ["fallSpeedMul", 0.0001, 10],
     ["spawnIntervalMul", 0.0001, 10],

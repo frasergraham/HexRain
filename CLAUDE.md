@@ -488,7 +488,7 @@ SLOW_/FAST_/STICK_SLOW_BUFFER_*                 effect durations
 SLOW_TIMESCALE, FAST_TIMESCALE_BASE/_STEP,
   FAST_MULTIPLIER_BASE/_STEP                    effect rates
 SHIELD_/DRONE_*                                 shield + drone
-LATE_RAMP_FLOOR_SCORE, LATE_RAMP_PER_100        endless ramp
+DEFAULT_LATE_RAMP_* (spawn.ts), lateRamp*       endless ramp (per-snapshot)
 HARDCORE_UNLOCK_SCORE                           PAINFUL difficulty unlock
 ROTATE_SLIDE_SENS                               touch rotation feel
 VITE_EDITOR_UNLOCKED (env)                      editor temp-unlock toggle

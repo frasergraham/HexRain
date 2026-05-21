@@ -132,6 +132,7 @@ import {
   CHALLENGE_BASE_FALL_SPEED,
   CHALLENGE_MAX_FALL_SPEED,
   COIN_SCORE_BONUS,
+  DIFFICULTY_CONFIG,
   type DifficultyConfig,
   DRONE_DURATION,
   FAST_EFFECT_DURATION,
@@ -7696,10 +7697,12 @@ export class Game {
   }
 
   // Score-driven cadence math lives in src/spawn.ts (Phase 1.5);
-  // this is a thin forwarder so call sites stay short. Routes the
-  // late-ramp tunables through the endless snapshot so CloudKit
-  // overrides apply.
+  // this is a thin forwarder so call sites stay short. Endless runs
+  // route through the snapshot so CloudKit overrides apply; challenge
+  // runs use the baked defaults so an endless-balance push can't
+  // accelerate hand-authored challenge timing mid-run.
   private lateGameSpeedMul(): number {
+    if (this.gameMode === "challenge") return lateGameSpeedMul(this.score);
     return lateGameSpeedMul(this.score, this.endlessSnapshot.lateRamp);
   }
 
@@ -7786,10 +7789,18 @@ export class Game {
     );
   }
 
-  // The active difficulty's tunable bundle. Sourced from the endless
-  // snapshot so CloudKit overrides apply consistently for the full
-  // duration of a run.
+  // The active difficulty's tunable bundle.
+  //
+  // Endless runs read the snapshot, so CloudKit endlessBalance-* pushes
+  // apply consistently for the duration of a run. Challenge runs read
+  // DIFFICULTY_CONFIG directly: challenge waves are hand-authored against
+  // specific tunables (spawn cadence, effect durations, dangerSize) and
+  // routing them through endlessSnapshot would let an endless-balance
+  // override silently break challenge playability + star thresholds.
+  // Challenge content has its own CloudKit override channel via
+  // officialOverrides; this getter is not the seam for that.
   private cfg(): DifficultyConfig {
+    if (this.gameMode === "challenge") return DIFFICULTY_CONFIG[this.difficulty];
     return this.endlessSnapshot.config;
   }
 
