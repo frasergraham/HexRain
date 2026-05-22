@@ -160,26 +160,28 @@ Normal tier:    rest                 → blue
 Tier weights live in `spawnKind.ts` as `SPAWN_*_TIER_WEIGHT` constants.
 Per-difficulty `stickyMul` / `helpfulMul` / `challengeMul` scale each
 tier independently; `helpfulExclude` drops kinds entirely. The rebalance
-shipped 2026-05 starves sticky + helpful at higher difficulties while
-challenge (fast + big — opt-in risk/reward, not buffs) mildly ramps up.
+shipped 2026-05 keeps Easy at the old "heal-rich training" ratio,
+preserves the brutal PAINFUL endpoint, and ramps Medium / Hard
+between them. Challenge tier (fast + big — opt-in risk/reward, not
+buffs) mildly ramps up with difficulty.
 
 Calm-wave shares at score ≥400 (all kinds eligible):
 
 | Difficulty | (sticky / helpful / challenge muls) | Sticky | Helpful | Challenge | Normal |
 | --- | --- | --- | --- | --- | --- |
-| Easy    | ×0.40 / ×0.35 / ×1.0 | 4.0% | 6.7% | 5.0% | 84.3% |
-| Medium  | ×0.20 / ×0.20 / ×1.1 | 2.0% | 3.8% | 5.5% | 88.7% |
-| Hard    | ×0.08 / ×0.12 / ×1.2 | 0.8% | 2.3% | 6.0% | 90.9% |
-| PAINFUL | ×0.04 / ×0.05 / ×1.2 | 0.4% | 1.0% | 6.0% | 92.7% |
+| Easy    | ×1.50 / ×1.32 / ×1.0  | 15.0% | 25.1% | 5.0% | 54.9% |
+| Medium  | ×1.00 / ×0.90 / ×1.1  | 10.0% | 17.1% | 5.5% | 67.4% |
+| Hard    | ×0.50 / ×0.45 / ×1.2  |  5.0% |  8.6% | 6.0% | 80.5% |
+| PAINFUL | ×0.04 / ×0.05 / ×1.2  |  0.4% |  1.0% | 6.0% | 92.7% |
 
 Combined (calm + swarm) normal:special ratios — swarms are 35% of waves
 at an 88/12 normal/sticky mix:
 
 | Difficulty | Normal | Specials | **N : S** |
 | --- | ---: | ---: | ---: |
-| Easy    | 85.6% | 14.4% | **5.96 : 1** |
-| Medium  | 88.5% | 11.5% | **7.67 : 1** |
-| Hard    | 90.1% |  9.9% | **9.10 : 1** |
+| Easy    | 66.5% | 33.5% | **1.99 : 1** |
+| Medium  | 74.6% | 25.4% | **2.94 : 1** |
+| Hard    | 83.3% | 16.7% | **4.99 : 1** |
 | PAINFUL | 91.0% |  9.0% | **10.13 : 1** |
 
 PAINFUL re-enables `slow` + `tiny` (no `helpfulExclude`) and sets

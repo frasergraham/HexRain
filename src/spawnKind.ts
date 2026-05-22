@@ -58,17 +58,20 @@ export interface DifficultyConfig {
 }
 
 // Rebalanced 2026-05: combined normal:special ratios shift from
-// 2:1 / 2.8:1 / 3.6:1 / 3.9:1 to 6:1 / 7.5:1 / 9:1 / ~10:1.
-// Sticky + helpful muls drop sharply with difficulty; challenge
-// (fast + big) mildly rises — they're opt-in risk/reward, not buffs.
-// PAINFUL re-enables slow + tiny at very low share and bumps
-// dangerSize 3 → 5 so the rarer heals have room to land.
+// 2:1 / 2.8:1 / 3.6:1 / 3.9:1 to 2:1 / 3:1 / 5:1 / 10:1. Easy
+// matches the pre-rebalance ratio (heal-rich training mode);
+// Medium ≈ old-Medium; Hard sits between old-Hard and the
+// "specials are rare" feel; PAINFUL is the brutal endpoint.
+// Challenge tier (fast + big, opt-in risk/reward) mildly ramps
+// up because those are challenges, not buffs. PAINFUL re-enables
+// slow + tiny at very low share and bumps dangerSize 3 → 5 so the
+// rarer heals have room to land.
 export const DIFFICULTY_CONFIG: Record<Difficulty, DifficultyConfig> = {
   easy: {
     fallSpeedMul: 0.8,
     spawnIntervalMul: 1.25,
-    stickyMul: 0.40,
-    helpfulMul: 0.35,
+    stickyMul: 1.5,
+    helpfulMul: 1.32,
     challengeMul: 1.0,
     tinyMinScore: 300,
     bigMinScore: 300,
@@ -81,8 +84,8 @@ export const DIFFICULTY_CONFIG: Record<Difficulty, DifficultyConfig> = {
   medium: {
     fallSpeedMul: 1.0,
     spawnIntervalMul: 1.0,
-    stickyMul: 0.20,
-    helpfulMul: 0.20,
+    stickyMul: 1.0,
+    helpfulMul: 0.90,
     challengeMul: 1.1,
     tinyMinScore: 300,
     bigMinScore: 300,
@@ -95,8 +98,8 @@ export const DIFFICULTY_CONFIG: Record<Difficulty, DifficultyConfig> = {
   hard: {
     fallSpeedMul: 1.35,
     spawnIntervalMul: 0.85,
-    stickyMul: 0.08,
-    helpfulMul: 0.12,
+    stickyMul: 0.50,
+    helpfulMul: 0.45,
     challengeMul: 1.2,
     tinyMinScore: 0,
     bigMinScore: 0,
