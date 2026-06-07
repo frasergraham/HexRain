@@ -305,6 +305,8 @@ describe("snapshotEndlessBalance", () => {
   it("is frozen — mutation attempts have no effect", () => {
     const snap = snapshotEndlessBalance("easy");
     expect(Object.isFrozen(snap)).toBe(true);
+    expect(Object.isFrozen(snap.config)).toBe(true);
+    expect(Object.isFrozen(snap.tunables)).toBe(true);
     expect(Object.isFrozen(snap.tierWeights)).toBe(true);
     expect(Object.isFrozen(snap.lateRamp)).toBe(true);
     expect(Object.isFrozen(snap.spawnInterval)).toBe(true);

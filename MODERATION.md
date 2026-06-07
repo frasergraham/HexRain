@@ -132,8 +132,12 @@ and validation ranges.
 ### Push workflow
 
 ```sh
-# Preview the effect locally first — the simulator accepts the same
-# shape via its --config flag (extends with byDifficulty fan-out).
+# Preview the effect locally first. NOTE: the simulator --config flag
+# uses a DIFFERENT shape from the per-scope upload file above — it
+# takes a single fan-out object covering every scope at once:
+#   { "global": { ... }, "byDifficulty": { "hardcore": { ... }, ... } }
+# So you can't pass the upload file directly; re-shape into the
+# fan-out form for the preview run.
 npx tsx scripts/simulate.ts --audit --config /tmp/preview.json
 
 # Upload the override as draft (status="draft"), then flip it live.

@@ -64,7 +64,10 @@ export interface GlobalEndlessTunables {
   helpfulTierWeight: number;
   challengeTierWeight: number;
 
-  // Calm-wave spawn cadence.
+  // Calm-wave spawn cadence. Note: wave-phase cadence
+  // (waveSpawnInterval, computed inside computeWaveParams from the
+  // calm values) is NOT independently CloudKit-tunable — only the
+  // calm cadence here and swarmSpawnInterval below.
   spawnIntervalStart: number;
   spawnIntervalMin: number;
   spawnIntervalRamp: number;
@@ -379,10 +382,13 @@ export function buildSnapshot(
   config: DifficultyConfig,
   tunables: GlobalEndlessTunables,
 ): EndlessBalanceSnapshot {
+  // Spread before freezing: the input may be DIFFICULTY_CONFIG[d] or
+  // DEFAULT_GLOBAL_TUNABLES directly (no override path), and freezing
+  // those module-level constants would propagate to every other reader.
   return Object.freeze({
     difficulty: d,
-    config,
-    tunables,
+    config: Object.freeze({ ...config }),
+    tunables: Object.freeze({ ...tunables }),
     tierWeights: Object.freeze({
       sticky: tunables.stickyTierWeight,
       helpful: tunables.helpfulTierWeight,
