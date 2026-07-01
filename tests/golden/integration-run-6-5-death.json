@@ -1186,8 +1186,8 @@
     1,
     1,
     1,
-    1,
-    1,
+    0,
+    0,
     0,
     0,
     0,
@@ -3039,7 +3039,7 @@
   ],
   "stateTransitions": [
     "0:playing",
-    "1183:gameover"
+    "1181:gameover"
   ],
   "playerSizeTimeline": [
     1,

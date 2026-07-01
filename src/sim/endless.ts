@@ -6,22 +6,19 @@
 import type { Difficulty } from "../types";
 import { mulberry32 } from "../rng";
 import {
-  BASE_FALL_SPEED,
   BOARD_COLS,
-  DIFFICULTY_CONFIG,
   type DifficultyConfig,
   FAST_TIMESCALE_BASE,
   FAST_TIMESCALE_STEP,
   HALF_COLS,
-  MAX_FALL_SPEED,
-  pickKind,
+  pickKindWithWeights,
   SLOW_TIMESCALE,
-  SPEED_RAMP,
   STICKY_MIN_SCORE,
-  SWARM_SPAWN_INTERVAL,
-  SWARM_STICKY_CHANCE,
-  SWARM_WAVE_CHANCE,
 } from "../spawnKind";
+import {
+  snapshotFromOverrides,
+  type EndlessBalanceSnapshot,
+} from "../endlessBalance";
 import { BASE_REACTION_WINDOW_SEC } from "./constants";
 import { computeWaveParams, lateGameSpeedMul } from "../spawn";
 import {
@@ -53,13 +50,15 @@ export function runEndless(
   difficulty: Difficulty,
   skill: SkillProfile,
   seed: number,
+  snapshot: EndlessBalanceSnapshot = snapshotFromOverrides(difficulty),
 ): RunResult {
-  const cfg = DIFFICULTY_CONFIG[difficulty];
+  const cfg = snapshot.config;
+  const tn = snapshot.tunables;
   const rng = mulberry32(seed >>> 0);
   const state = initSimState(cfg, difficulty, skill, rng);
   const inFlight: SpawnEvent[] = [];
 
-  let wp = computeWaveParams(state.score, cfg.spawnIntervalMul);
+  let wp = computeWaveParams(state.score, cfg.spawnIntervalMul, snapshot.spawnInterval);
   const loop: EndlessLoopState = {
     inWave: false,
     isSwarm: false,
@@ -69,15 +68,15 @@ export function runEndless(
   };
 
   const currentSpawnInterval = (): number => {
-    if (loop.isSwarm) return SWARM_SPAWN_INTERVAL;
+    if (loop.isSwarm) return tn.swarmSpawnInterval;
     return !loop.inWave ? wp.calmSpawnInterval : wp.waveSpawnInterval;
   };
 
   const startPhase = (wave: boolean): void => {
     loop.inWave = wave;
-    wp = computeWaveParams(state.score, cfg.spawnIntervalMul);
+    wp = computeWaveParams(state.score, cfg.spawnIntervalMul, snapshot.spawnInterval);
     if (wave) {
-      loop.isSwarm = rng() < SWARM_WAVE_CHANCE;
+      loop.isSwarm = rng() < tn.swarmWaveChance;
       loop.safeCol = Math.floor(rng() * BOARD_COLS) - HALF_COLS;
       loop.phaseEndsAt = state.tNow + wp.waveDuration;
     } else {
@@ -127,7 +126,7 @@ export function runEndless(
 
     if (nextSpawnT <= nextImpactT) {
       // Spawn next.
-      processSpawn(state, loop, wp, inFlight, rng, cfg, timescale());
+      processSpawn(state, loop, wp, inFlight, rng, cfg, snapshot, timescale());
     } else {
       // Impact next.
       const event = inFlight.shift()!;
@@ -170,8 +169,10 @@ function processSpawn(
   inFlight: SpawnEvent[],
   rng: () => number,
   cfg: DifficultyConfig,
+  snapshot: EndlessBalanceSnapshot,
   timescaleNow: number,
 ): void {
+  const tn = snapshot.tunables;
   // Advance state.tNow to the spawn time, moving the player along
   // and expiring any timers that lapsed in between.
   advancePlayerPosition(state, loop.nextSpawnAt);
@@ -180,11 +181,11 @@ function processSpawn(
   // Kind selection.
   let kind: ClusterKind = "normal";
   if (loop.isSwarm) {
-    if (state.score >= STICKY_MIN_SCORE && rng() < SWARM_STICKY_CHANCE) {
+    if (state.score >= STICKY_MIN_SCORE && rng() < tn.swarmStickyChance) {
       kind = "sticky";
     }
   } else {
-    kind = pickKind(cfg, state.score, rng);
+    kind = pickKindWithWeights(cfg, state.score, rng, snapshot.tierWeights);
   }
 
   // Cluster size.
@@ -203,23 +204,23 @@ function processSpawn(
 
   // Reaction window — how long the cluster is in flight before impact.
   // Mirrors live computeFallSpeed: a base that ramps with score and is
-  // capped at MAX_FALL_SPEED, then multiplied by late-game ramp +
+  // capped at maxFallSpeed, then multiplied by late-game ramp +
   // wave-speed + slow/fast timescale. Anchored so at score=0 medium
-  // calm (effectiveV == BASE_FALL_SPEED) the window equals BASE.
+  // calm (effectiveV == baseFallSpeed) the window equals BASE.
   const baseV = Math.min(
-    MAX_FALL_SPEED,
-    BASE_FALL_SPEED * cfg.fallSpeedMul + state.score * SPEED_RAMP,
+    tn.maxFallSpeed,
+    tn.baseFallSpeed * cfg.fallSpeedMul + state.score * tn.speedRamp,
   );
-  const waveCap = loop.inWave ? MAX_FALL_SPEED * 1.7 : MAX_FALL_SPEED;
+  const waveCap = loop.inWave ? tn.maxFallSpeed * 1.7 : tn.maxFallSpeed;
   const effectiveV = Math.min(
     waveCap,
     baseV *
-      lateGameSpeedMul(state.score) *
+      lateGameSpeedMul(state.score, snapshot.lateRamp) *
       (loop.inWave ? wp.waveSpeedMul : 1) *
       timescaleNow,
   );
   const reactionWindow =
-    (BASE_REACTION_WINDOW_SEC * BASE_FALL_SPEED) / Math.max(0.4, effectiveV);
+    (BASE_REACTION_WINDOW_SEC * tn.baseFallSpeed) / Math.max(0.4, effectiveV);
 
   const event: SpawnEvent = {
     kind,
@@ -236,14 +237,15 @@ function processSpawn(
   // Re-plan with the updated queue.
   chooseTarget(state, inFlight);
 
-  loop.nextSpawnAt = state.tNow + currentSpawnIntervalFor(loop, wp);
+  loop.nextSpawnAt = state.tNow + currentSpawnIntervalFor(loop, wp, snapshot);
 }
 
 function currentSpawnIntervalFor(
   loop: EndlessLoopState,
   wp: ReturnType<typeof computeWaveParams>,
+  snapshot: EndlessBalanceSnapshot,
 ): number {
-  if (loop.isSwarm) return SWARM_SPAWN_INTERVAL;
+  if (loop.isSwarm) return snapshot.tunables.swarmSpawnInterval;
   return !loop.inWave ? wp.calmSpawnInterval : wp.waveSpawnInterval;
 }
 

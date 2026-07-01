@@ -62,6 +62,13 @@ import {
   upsertOverride,
   type OfficialChallengeOverridePayload,
 } from "./officialOverrides";
+import {
+  DIFFICULTY_SCOPES,
+  clearOverride as clearEndlessOverride,
+  upsertOverride as upsertEndlessOverride,
+  type EndlessOverridePayload,
+  type EndlessOverrideScope,
+} from "./endlessBalance";
 
 // ---------- Identity ------------------------------------------------------
 
@@ -210,6 +217,7 @@ const SCORE_RECORD_TYPE = "Score";
 const UPVOTE_RECORD_TYPE = "Upvote";
 const REPORT_RECORD_TYPE = "Report";
 const OFFICIAL_OVERRIDE_RECORD_TYPE = "OfficialChallengeOverride";
+const ENDLESS_BALANCE_RECORD_TYPE = "EndlessBalanceOverride";
 
 export type CommunitySort = "newest" | "topVoted" | "mostPlayed";
 
@@ -467,6 +475,89 @@ function recordToOverridePayload(rec: CloudKitRecord): OfficialChallengeOverride
     updatedAt,
     note,
   };
+}
+
+// ---------- Endless balance overrides ------------------------------------
+
+// Pull EndlessBalanceOverride records on cold launch. Mirrors
+// pullOfficialOverrides — small corpus (≤ 5 records, one per scope),
+// fetched unfiltered, reconciled client-side by status.
+//
+// status semantics:
+//   - "live"    → upsert into the local store
+//   - "retired" → clear any local cache for that scope
+//   - "draft"   → ignored
+//
+// Public DB, world-readable — works on web with VITE_CLOUDKIT_API_TOKEN
+// configured, no iCloud account required.
+export async function pullEndlessBalanceConfig(): Promise<void> {
+  if (!isCommunityReadable()) return;
+  // Best-effort: a CloudKit hiccup or a missing record type (schema
+  // not yet deployed) must not reject Promise.all in main.ts and
+  // block subscribeToInstalledUpdates. Log + carry on.
+  try {
+    const result = await queryRecords({
+      db: "public",
+      recordType: ENDLESS_BALANCE_RECORD_TYPE,
+      limit: 10,
+    });
+    for (const rec of result.records) {
+      const status = stringField(rec.fields["status"]) ?? "draft";
+      const scope = stringField(rec.fields["scope"]);
+      if (!scope || !isValidEndlessScope(scope)) continue;
+      if (status === "retired") {
+        clearEndlessOverride(scope);
+        continue;
+      }
+      if (status !== "live") continue;
+      const payload = recordToEndlessPayload(rec, scope);
+      if (!payload) continue;
+      upsertEndlessOverride(payload);
+    }
+  } catch (err) {
+    console.warn("endlessBalance: pull failed", err);
+  }
+}
+
+function isValidEndlessScope(s: string): s is EndlessOverrideScope {
+  return s === "global" || (DIFFICULTY_SCOPES as readonly string[]).includes(s);
+}
+
+function recordToEndlessPayload(
+  rec: CloudKitRecord,
+  scope: EndlessOverrideScope,
+): EndlessOverridePayload | null {
+  const version = numberField(rec.fields["version"]) ?? 1;
+  // Refuse to synthesise a timestamp: falling back to Date.now() means
+  // the freshly-minted "now" beats whatever's in localStorage on every
+  // cold launch, triggering wasted upserts. If the record genuinely
+  // lacks both updatedAt and modifiedAt the publisher messed up — skip.
+  const updatedAt = numberField(rec.fields["updatedAt"]) ?? rec.modifiedAt;
+  if (typeof updatedAt !== "number" || !Number.isFinite(updatedAt)) {
+    console.warn(`endlessBalance: ${rec.recordName} missing updatedAt + modifiedAt, skipping`);
+    return null;
+  }
+  const note = stringField(rec.fields["note"]) ?? undefined;
+
+  const configRaw = stringField(rec.fields["config"]);
+  let config: EndlessOverridePayload["config"];
+  if (configRaw) {
+    try {
+      const parsed = JSON.parse(configRaw) as EndlessOverridePayload["config"];
+      if (parsed && typeof parsed === "object") config = parsed;
+    } catch { /* fall through */ }
+  }
+
+  const globalRaw = stringField(rec.fields["global"]);
+  let global: EndlessOverridePayload["global"];
+  if (globalRaw) {
+    try {
+      const parsed = JSON.parse(globalRaw) as EndlessOverridePayload["global"];
+      if (parsed && typeof parsed === "object") global = parsed;
+    } catch { /* fall through */ }
+  }
+
+  return { scope, config, global, version, updatedAt, note };
 }
 
 // ---------- Leaderboard --------------------------------------------------

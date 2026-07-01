@@ -11,13 +11,13 @@ describe("lateGameSpeedMul", () => {
   it("ramps 10% per 100 points past the floor", () => {
     expect(lateGameSpeedMul(600)).toBeCloseTo(1.1);
     expect(lateGameSpeedMul(700)).toBeCloseTo(1.2);
-    expect(lateGameSpeedMul(1000)).toBeCloseTo(1.5);
+    expect(lateGameSpeedMul(900)).toBeCloseTo(1.4);
   });
 
-  it("caps at 1.8x", () => {
-    expect(lateGameSpeedMul(1300)).toBe(1.8);
-    expect(lateGameSpeedMul(2000)).toBe(1.8);
-    expect(lateGameSpeedMul(99999)).toBe(1.8);
+  it("caps at 1.5x", () => {
+    expect(lateGameSpeedMul(1000)).toBe(1.5);
+    expect(lateGameSpeedMul(2000)).toBe(1.5);
+    expect(lateGameSpeedMul(99999)).toBe(1.5);
   });
 
   it("treats negative scores as 1.0 (clamps the ramp at zero)", () => {

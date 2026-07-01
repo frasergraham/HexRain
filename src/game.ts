@@ -117,10 +117,12 @@ import { hashSeed, mulberry32, type Random } from "./rng";
 import { loadBool, loadJson, loadString, removeKey, saveBool, saveJson, saveString } from "./storage";
 import { STORAGE_KEYS } from "./storageKeys";
 import { computeWaveParams, lateGameSpeedMul } from "./spawn";
+import {
+  snapshotEndlessBalance,
+  type EndlessBalanceSnapshot,
+} from "./endlessBalance";
 import { highestTierCrossed, stepMilestones } from "./scoring";
 import {
-  ANGLED_SPAWNS_SCORE,
-  BASE_FALL_SPEED,
   BIG_DURATION,
   BOARD_COLS,
   BIG_MULTIPLIER_BASE,
@@ -139,19 +141,13 @@ import {
   FAST_TIMESCALE_BASE,
   FAST_TIMESCALE_STEP,
   LOSE_COMBO,
-  MAX_FALL_SPEED,
-  pickKind as pickKindPure,
+  pickKindWithWeights,
   SHIELD_DURATION,
-  SIDE_SPAWNS_SCORE,
   SLOW_EFFECT_DURATION,
   SLOW_TIMESCALE,
-  SPEED_RAMP,
   STICK_INVULN_MS,
   STICK_SLOW_BUFFER,
   STICKY_MIN_SCORE,
-  SWARM_SPAWN_INTERVAL,
-  SWARM_STICKY_CHANCE,
-  SWARM_WAVE_CHANCE,
   TINY_DURATION,
   TINY_PLAYER_SCALE,
   TINY_REHIT_BONUS,
@@ -400,6 +396,13 @@ export class Game {
 
   private state: GameState = "menu";
   private difficulty: Difficulty = DIFFICULTY_DEFAULT;
+  // Snapshot of the active endless-balance config + global tunables.
+  // Captured at construction, refreshed when the player switches
+  // difficulty on the menu, and re-captured at every run start so a
+  // CloudKit pull that landed since menu render is picked up. Mid-run
+  // CloudKit pulls do NOT mutate this — the in-flight run keeps its
+  // snapshot to avoid surprising the player.
+  private endlessSnapshot: EndlessBalanceSnapshot = snapshotEndlessBalance(DIFFICULTY_DEFAULT);
   private score = 0;
   private best = 0;
   private comboHits = 0;
@@ -787,6 +790,7 @@ export class Game {
     }
 
     this.difficulty = this.loadDifficulty();
+    this.endlessSnapshot = snapshotEndlessBalance(this.difficulty);
     this.best = this.loadBestFor(this.difficulty);
     this.syncBestDisplays();
 
@@ -4968,6 +4972,10 @@ export class Game {
   // (transitions on into "playing") and quitToMenu (transitions on into
   // "menu") so both paths leave the engine and UI in a clean state.
   private resetRunState(initialScore: number): void {
+    // Re-snapshot endless balance — a CloudKit pull that landed since
+    // the player picked their difficulty on the menu gets picked up
+    // here. Mid-run pulls do NOT re-snapshot.
+    this.endlessSnapshot = snapshotEndlessBalance(this.difficulty);
     for (const s of this.sticksInFlight) Composite.remove(this.engine.world, s.body);
     this.sticksInFlight = [];
     for (const c of this.clusters) {
@@ -6982,12 +6990,17 @@ export class Game {
       // dodge phases.
       if (
         this.score >= STICKY_MIN_SCORE &&
-        Math.random() < SWARM_STICKY_CHANCE
+        Math.random() < this.endlessSnapshot.tunables.swarmStickyChance
       ) {
         kind = "sticky";
       }
     } else {
-      kind = pickKindPure(this.cfg(), this.score, Math.random);
+      kind = pickKindWithWeights(
+        this.cfg(),
+        this.score,
+        Math.random,
+        this.endlessSnapshot.tierWeights,
+      );
     }
 
     // Coin / shield / drone pickups and swarm hexes are always single-cell.
@@ -7006,7 +7019,7 @@ export class Game {
     // top so they're catchable.
     const sideSpawn =
       kind === "normal" &&
-      this.score >= SIDE_SPAWNS_SCORE &&
+      this.score >= this.endlessSnapshot.tunables.sideSpawnsScore &&
       Math.random() < 0.18;
 
     const speed = this.computeFallSpeed();
@@ -7038,7 +7051,7 @@ export class Game {
       // Angled-drop spawn: late game, some clusters drop at a non-vertical
       // angle. The angle stays small (≤ ~20°) so the cluster still ends up
       // somewhere reachable.
-      if (this.score >= ANGLED_SPAWNS_SCORE && kind === "normal" && Math.random() < 0.3) {
+      if (this.score >= this.endlessSnapshot.tunables.angledSpawnsScore && kind === "normal" && Math.random() < 0.3) {
         const angle = (Math.random() - 0.5) * 0.7;
         vx = Math.sin(angle) * speed;
         vy = Math.cos(angle) * speed;
@@ -7623,12 +7636,18 @@ export class Game {
   // ----- Wave / difficulty system -----
 
   private waveParams() {
-    return computeWaveParams(this.score, this.cfg().spawnIntervalMul);
+    return computeWaveParams(
+      this.score,
+      this.cfg().spawnIntervalMul,
+      this.endlessSnapshot.spawnInterval,
+    );
   }
 
   private currentSpawnInterval(): number {
     const p = this.waveParams();
-    if (this.wavePhase === "wave" && this.swarmWave) return SWARM_SPAWN_INTERVAL;
+    if (this.wavePhase === "wave" && this.swarmWave) {
+      return this.endlessSnapshot.tunables.swarmSpawnInterval;
+    }
     return this.wavePhase === "wave" ? p.waveSpawnInterval : p.calmSpawnInterval;
   }
 
@@ -7661,9 +7680,10 @@ export class Game {
     // Difficulty scales the starting velocity but not the per-score ramp,
     // so easy/hard read as a different "starting pace" that converges
     // toward the same late-game pressure.
+    const tn = this.endlessSnapshot.tunables;
     const base = Math.min(
-      MAX_FALL_SPEED,
-      BASE_FALL_SPEED * this.cfg().fallSpeedMul + this.score * SPEED_RAMP,
+      tn.maxFallSpeed,
+      tn.baseFallSpeed * this.cfg().fallSpeedMul + this.score * tn.speedRamp,
     );
     if (this.wavePhase === "wave") {
       // Each cluster picks its own speed within ±30% of the wave-multiplier
@@ -7671,15 +7691,19 @@ export class Game {
       const variance = this.swarmWave
         ? 0.6 + Math.random() * 0.9 // wider spread during a swarm
         : 0.7 + Math.random() * 0.6;
-      return Math.min(MAX_FALL_SPEED * 1.7, base * this.waveParams().waveSpeedMul * variance);
+      return Math.min(tn.maxFallSpeed * 1.7, base * this.waveParams().waveSpeedMul * variance);
     }
     return base;
   }
 
   // Score-driven cadence math lives in src/spawn.ts (Phase 1.5);
-  // this is a thin forwarder so call sites stay short.
+  // this is a thin forwarder so call sites stay short. Endless runs
+  // route through the snapshot so CloudKit overrides apply; challenge
+  // runs use the baked defaults so an endless-balance push can't
+  // accelerate hand-authored challenge timing mid-run.
   private lateGameSpeedMul(): number {
-    return lateGameSpeedMul(this.score);
+    if (this.gameMode === "challenge") return lateGameSpeedMul(this.score);
+    return lateGameSpeedMul(this.score, this.endlessSnapshot.lateRamp);
   }
 
   private advanceWavePhase(dt: number): void {
@@ -7696,7 +7720,7 @@ export class Game {
     this.wavePhase = "wave";
     this.wavePhaseTimer = 0;
     // Decide whether this is a single-hex swarm wave for variety.
-    this.swarmWave = Math.random() < SWARM_WAVE_CHANCE;
+    this.swarmWave = Math.random() < this.endlessSnapshot.tunables.swarmWaveChance;
     // Pick a fresh safe column. Swarm waves still respect this.
     const half = Math.floor(BOARD_COLS / 2);
     this.safeColumn = Math.floor(Math.random() * (half * 2 + 1)) - half;
@@ -7766,8 +7790,18 @@ export class Game {
   }
 
   // The active difficulty's tunable bundle.
+  //
+  // Endless runs read the snapshot, so CloudKit endlessBalance-* pushes
+  // apply consistently for the duration of a run. Challenge runs read
+  // DIFFICULTY_CONFIG directly: challenge waves are hand-authored against
+  // specific tunables (spawn cadence, effect durations, dangerSize) and
+  // routing them through endlessSnapshot would let an endless-balance
+  // override silently break challenge playability + star thresholds.
+  // Challenge content has its own CloudKit override channel via
+  // officialOverrides; this getter is not the seam for that.
   private cfg(): DifficultyConfig {
-    return DIFFICULTY_CONFIG[this.difficulty];
+    if (this.gameMode === "challenge") return DIFFICULTY_CONFIG[this.difficulty];
+    return this.endlessSnapshot.config;
   }
 
   // Danger threshold: the player size at which the red glow appears
@@ -7805,6 +7839,7 @@ export class Game {
   private setDifficulty(d: Difficulty): void {
     if (d === this.difficulty) return;
     this.difficulty = d;
+    this.endlessSnapshot = snapshotEndlessBalance(d);
     saveString(DIFFICULTY_STORAGE_KEY, d);
     this.best = this.loadBestFor(d);
     this.syncBestDisplays();

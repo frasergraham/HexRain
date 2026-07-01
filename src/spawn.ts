@@ -13,13 +13,39 @@
 // `this.*` fields and are deferred until those collaborators
 // (Spawner, WaveDirector) are extracted in Phase 3.
 
-const LATE_RAMP_FLOOR_SCORE = 500;
-const LATE_RAMP_PER_100 = 0.1;
-const LATE_RAMP_CAP = 1.8;
+// Default late-game ramp. Cap dropped from 1.8 → 1.5 so the score-1000+
+// curve stays readable instead of becoming reaction-time roulette.
+export const DEFAULT_LATE_RAMP_FLOOR_SCORE = 500;
+export const DEFAULT_LATE_RAMP_PER_100 = 0.1;
+export const DEFAULT_LATE_RAMP_CAP = 1.5;
 
-const SPAWN_INTERVAL_START = 1.6;
-const SPAWN_INTERVAL_MIN = 0.7;
-const SPAWN_INTERVAL_RAMP = 0.03;
+export const DEFAULT_SPAWN_INTERVAL_START = 1.6;
+export const DEFAULT_SPAWN_INTERVAL_MIN = 0.7;
+export const DEFAULT_SPAWN_INTERVAL_RAMP = 0.03;
+
+export interface LateRampTunables {
+  floor: number;
+  per100: number;
+  cap: number;
+}
+
+export const DEFAULT_LATE_RAMP: LateRampTunables = {
+  floor: DEFAULT_LATE_RAMP_FLOOR_SCORE,
+  per100: DEFAULT_LATE_RAMP_PER_100,
+  cap: DEFAULT_LATE_RAMP_CAP,
+};
+
+export interface SpawnIntervalTunables {
+  start: number;
+  min: number;
+  ramp: number;
+}
+
+export const DEFAULT_SPAWN_INTERVAL: SpawnIntervalTunables = {
+  start: DEFAULT_SPAWN_INTERVAL_START,
+  min: DEFAULT_SPAWN_INTERVAL_MIN,
+  ramp: DEFAULT_SPAWN_INTERVAL_RAMP,
+};
 
 export interface WaveParams {
   waveDuration: number;
@@ -30,18 +56,25 @@ export interface WaveParams {
 }
 
 // Late-game permanent speed multiplier. Every 100 points past the
-// floor adds 10% to the base rate; capped at 1.8× so the game stays
-// playable at extreme scores.
+// floor adds 10% to the base rate; capped so the game stays playable
+// at extreme scores. The optional `ramp` argument lets the live game
+// inject CloudKit-delivered overrides.
 //
-// Examples: 0..500 → 1.0×; 600 → 1.1×; 1000 → 1.5×; 1300+ → 1.8×.
-export function lateGameSpeedMul(score: number): number {
-  const raw = 1 + Math.max(0, (score - LATE_RAMP_FLOOR_SCORE) / 100) * LATE_RAMP_PER_100;
-  return Math.min(LATE_RAMP_CAP, raw);
+// Examples (defaults): 0..500 → 1.0×; 600 → 1.1×; 1000+ → 1.5×.
+export function lateGameSpeedMul(score: number, ramp: LateRampTunables = DEFAULT_LATE_RAMP): number {
+  const raw = 1 + Math.max(0, (score - ramp.floor) / 100) * ramp.per100;
+  return Math.min(ramp.cap, raw);
 }
 
 // Wave / calm cadence + speed parameters at a given score and
 // difficulty's spawn-interval multiplier. Pure: no engine state.
-export function computeWaveParams(score: number, spawnIntervalMul: number): WaveParams {
+// `interval` defaults to the module constants; the live game passes
+// the snapshot's overridden values.
+export function computeWaveParams(
+  score: number,
+  spawnIntervalMul: number,
+  interval: SpawnIntervalTunables = DEFAULT_SPAWN_INTERVAL,
+): WaveParams {
   return {
     // Wave grows from short to long with score.
     waveDuration: Math.min(8, 2.2 + score * 0.06),
@@ -52,8 +85,8 @@ export function computeWaveParams(score: number, spawnIntervalMul: number): Wave
     // Calm spawn cadence: original curve, with the difficulty's
     // starting interval scaling.
     calmSpawnInterval: Math.max(
-      SPAWN_INTERVAL_MIN,
-      SPAWN_INTERVAL_START * spawnIntervalMul - score * SPAWN_INTERVAL_RAMP,
+      interval.min,
+      interval.start * spawnIntervalMul - score * interval.ramp,
     ),
     // Wave fall speed multiplier on top of base.
     waveSpeedMul: Math.min(2.5, 1.5 + score * 0.015),

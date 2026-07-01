@@ -74,9 +74,10 @@ top-of-leaderboard data; recalibrate when telemetry changes.
 | **`storageKeys.ts`** | Registry of every `hexrain.*` key the app reads or writes |
 | **`palettes.ts`** | All `ClusterKind` colour data: `blobPalette`, `hintPalette`, `debrisPalette` (re-exported from `cluster.ts` and used by `debris.ts`) |
 | **`validation.ts`** | `clamp`, `clampDifficulty`, `clampStars`, `numOr` — shared by custom-challenge loader + CloudKit field marshalling |
-| **`spawn.ts`** | `lateGameSpeedMul(score)` + `computeWaveParams(score, spawnIntervalMul)` — pure score-driven cadence |
+| **`spawn.ts`** | `lateGameSpeedMul(score, ramp?)` + `computeWaveParams(score, spawnIntervalMul, interval?)` — pure score-driven cadence with optional override-aware tunable bundles |
 | **`scoring.ts`** | `stepMilestones(score, tiers, startIdx)` + `highestTierCrossed(banked, tiers)` — pure milestone awards |
-| **`spawnKind.ts`** | `DIFFICULTY_CONFIG`, tier-weight + score-gate constants, `pickKind` / `pickHelpfulKind` / `pickChallengeKind` — pure spawn-balance data shared by `game.ts` and the offline sim |
+| **`spawnKind.ts`** | `DIFFICULTY_CONFIG`, tier-weight + score-gate constants, `pickKind` / `pickKindWithWeights` / `pickHelpfulKind` / `pickChallengeKind` — pure spawn-balance data shared by `game.ts` and the offline sim |
+| **`endlessBalance.ts`** | CloudKit-delivered overrides for endless balance — per-difficulty `DifficultyConfig` + global endless tunables. Mirrors `officialOverrides.ts` shape. `snapshotEndlessBalance(d)` captured at run start so mid-run pulls don't surprise the player |
 | **`sim/*.ts`** | Encounter-level offline simulator. `sim/types.ts`, `sim/skills.ts`, `sim/encounter.ts` (lookahead planner + pHit/pCatch resolver), `sim/endless.ts`, `sim/challenge.ts`, `sim/aggregate.ts` (percentiles, diff). Run via `tsx scripts/simulate.ts` |
 
 iOS native plugins live in `ios/App/CapApp-SPM/Sources/CapApp-SPM/`:
@@ -126,7 +127,7 @@ challenges can lower `dangerSize` (e.g. hardcore-style runs).
 ### Late-game ramp
 
 After score `LATE_RAMP_FLOOR_SCORE = 500`, base rate ramps `+10%` per 100
-points (`LATE_RAMP_PER_100`), capped at 1.8× at score 1300+. Slow / fast /
+points (`LATE_RAMP_PER_100`), capped at 1.5× at score 1000+. Slow / fast /
 hint / tutorial modifiers stack multiplicatively on top.
 
 ## Cluster kinds (`ClusterKind`)
@@ -156,24 +157,54 @@ Challenge tier:  5%                  → fast (≥5), big (≥cfg)
 Normal tier:    rest                 → blue
 ```
 
-Tier weights live in `game.ts` as `SPAWN_*_TIER_WEIGHT` constants and
-are tunables. Per-difficulty `stickyMul` / `helpfulMul` / `challengeMul`
-scale each tier independently; `helpfulExclude` drops kinds entirely
-(PAINFUL excludes `slow`). Resulting share at score ≥400 (all kinds
-eligible):
+Tier weights live in `spawnKind.ts` as `SPAWN_*_TIER_WEIGHT` constants.
+Per-difficulty `stickyMul` / `helpfulMul` / `challengeMul` scale each
+tier independently; `helpfulExclude` drops kinds entirely. The rebalance
+shipped 2026-05 keeps Easy at the old "heal-rich training" ratio,
+preserves the brutal PAINFUL endpoint, and ramps Medium / Hard
+between them. Challenge tier (fast + big — opt-in risk/reward, not
+buffs) mildly ramps up with difficulty.
 
-| Difficulty | Sticky | Helpful | Challenge | Normal |
-| --- | --- | --- | --- | --- |
-| Easy    (×1.5 / ×1.32 / ×1.0) | 15% | ~25% | 5% | ~55% |
-| Medium  (×1.0 / ×1.0  / ×1.0) | 10% | 19%  | 5% | 66%  |
-| Hard    (×0.6 / ×0.84 / ×1.0) |  6% | ~16% | 5% | ~73% |
-| PAINFUL (×0.5 / ×0.53 / ×1.0) |  5% | ~10% | 5% | ~80% |
+Calm-wave shares at score ≥400 (all kinds eligible):
 
-Tier-share targets currently exact-restore the pre-BIG/TINY normal
-share — expected to drift as we iterate.
+| Difficulty | (sticky / helpful / challenge muls) | Sticky | Helpful | Challenge | Normal |
+| --- | --- | --- | --- | --- | --- |
+| Easy    | ×1.50 / ×1.32 / ×1.0  | 15.0% | 25.1% | 5.0% | 54.9% |
+| Medium  | ×1.00 / ×0.90 / ×1.1  | 10.0% | 17.1% | 5.5% | 67.4% |
+| Hard    | ×0.50 / ×0.45 / ×1.2  |  5.0% |  8.6% | 6.0% | 80.5% |
+| PAINFUL | ×0.04 / ×0.05 / ×1.2  |  0.4% |  1.0% | 6.0% | 92.7% |
+
+Combined (calm + swarm) normal:special ratios — swarms are 35% of waves
+at an 88/12 normal/sticky mix:
+
+| Difficulty | Normal | Specials | **N : S** |
+| --- | ---: | ---: | ---: |
+| Easy    | 66.5% | 33.5% | **1.99 : 1** |
+| Medium  | 74.6% | 25.4% | **2.94 : 1** |
+| Hard    | 83.3% | 16.7% | **4.99 : 1** |
+| PAINFUL | 91.0% |  9.0% | **10.13 : 1** |
+
+PAINFUL re-enables `slow` + `tiny` (no `helpfulExclude`) and sets
+`dangerSize: 5` (was 3) so the rarer heals have room to land.
 
 Swarm waves (35% of waves) drop single-hex sequences at 0.18 s cadence;
 12% of swarm hexes spawn as red heals (≥3) — only normal + sticky.
+
+### Endless balance overrides (CloudKit)
+
+Endless balance is tunable from CloudKit without an app release. The
+`EndlessBalanceOverride` record type (public DB, world-readable) carries
+per-difficulty `DifficultyConfig` overrides and global tunable overrides
+(tier weights, fall velocities, late-ramp, spawn intervals, swarm,
+geometry score gates). Pulled at cold launch by `pullEndlessBalanceConfig`
+alongside `pullOfficialOverrides`. Applied via a snapshot captured at
+run start (`Game.endlessSnapshot`) so mid-run pulls don't surprise the
+player — the next run picks up the new values.
+
+Five scopes: `endlessBalance-easy`, `endlessBalance-medium`,
+`endlessBalance-hard`, `endlessBalance-hardcore`, `endlessBalance-global`.
+`status` field gates `live` vs `retired` vs `draft`. See
+`src/endlessBalance.ts` and `cloudkit/README.md` for the push workflow.
 
 ### Wave system (endless mode)
 
@@ -459,7 +490,7 @@ SLOW_/FAST_/STICK_SLOW_BUFFER_*                 effect durations
 SLOW_TIMESCALE, FAST_TIMESCALE_BASE/_STEP,
   FAST_MULTIPLIER_BASE/_STEP                    effect rates
 SHIELD_/DRONE_*                                 shield + drone
-LATE_RAMP_FLOOR_SCORE, LATE_RAMP_PER_100        endless ramp
+DEFAULT_LATE_RAMP_* (spawn.ts), lateRamp*       endless ramp (per-snapshot)
 HARDCORE_UNLOCK_SCORE                           PAINFUL difficulty unlock
 ROTATE_SLIDE_SENS                               touch rotation feel
 VITE_EDITOR_UNLOCKED (env)                      editor temp-unlock toggle

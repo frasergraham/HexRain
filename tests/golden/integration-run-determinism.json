@@ -1,7 +1,7 @@
 {
   "challengeId": "9-9",
   "ticks": 6000,
-  "finalScore": 74,
+  "finalScore": 75,
   "finalState": "challengeComplete",
   "spawns": [
     {
@@ -152,7 +152,7 @@
       "waveIdx": 1,
       "kind": "normal",
       "size": 2,
-      "x": 144,
+      "x": 132,
       "y": -83.14,
       "vx": 0,
       "vy": 13.2,
@@ -163,7 +163,7 @@
       "waveIdx": 1,
       "kind": "sticky",
       "size": 1,
-      "x": 180,
+      "x": 164,
       "y": -83.14,
       "vx": -7.453,
       "vy": 10.894,
@@ -181,18 +181,18 @@
       "spin": 0.0109
     },
     {
-      "tick": 750,
+      "tick": 726,
       "waveIdx": 1,
       "kind": "fast",
       "size": 1,
-      "x": 108,
+      "x": 100,
       "y": -83.14,
       "vx": -1.973,
       "vy": 13.052,
       "spin": 0.0343
     },
     {
-      "tick": 786,
+      "tick": 755,
       "waveIdx": 2,
       "kind": "normal",
       "size": 2,
@@ -203,106 +203,106 @@
       "spin": -0.005
     },
     {
-      "tick": 815,
+      "tick": 784,
       "waveIdx": 2,
       "kind": "normal",
       "size": 1,
-      "x": 185.79,
+      "x": 180,
       "y": -83.14,
       "vx": 2.385,
       "vy": 13.592,
       "spin": -0.0182
     },
     {
-      "tick": 855,
+      "tick": 824,
       "waveIdx": 2,
       "kind": "normal",
       "size": 3,
-      "x": 155.73,
+      "x": 170.79,
       "y": -83.14,
       "vx": 2.993,
       "vy": 13.472,
       "spin": -0.016
     },
     {
-      "tick": 912,
+      "tick": 881,
       "waveIdx": 2,
       "kind": "normal",
       "size": 1,
-      "x": 193.83,
+      "x": 176.96,
       "y": -83.14,
       "vx": 0.086,
       "vy": 13.8,
       "spin": 0.0327
     },
     {
-      "tick": 969,
+      "tick": 938,
       "waveIdx": 2,
       "kind": "normal",
       "size": 1,
-      "x": 143.39,
+      "x": 160.17,
       "y": -83.14,
       "vx": -0.678,
       "vy": 13.783,
       "spin": -0.0223
     },
     {
-      "tick": 1026,
+      "tick": 993,
       "waveIdx": 2,
       "kind": "normal",
       "size": 2,
-      "x": 203.32,
+      "x": 184.09,
       "y": -83.14,
       "vx": -3.405,
       "vy": 13.373,
       "spin": 0.0197
     },
     {
-      "tick": 1079,
+      "tick": 1041,
       "waveIdx": 2,
       "kind": "normal",
       "size": 1,
-      "x": 212.82,
+      "x": 228.22,
       "y": -83.14,
       "vx": 2.188,
       "vy": 13.625,
       "spin": -0.0296
     },
     {
-      "tick": 1129,
+      "tick": 1070,
       "waveIdx": 2,
       "kind": "normal",
       "size": 2,
-      "x": 168.38,
+      "x": 215.39,
       "y": -83.14,
       "vx": 2.187,
       "vy": 13.626,
       "spin": -0.0143
     },
     {
-      "tick": 1158,
+      "tick": 1099,
       "waveIdx": 2,
       "kind": "normal",
       "size": 1,
-      "x": 220.27,
+      "x": 167.65,
       "y": -83.14,
       "vx": 3.041,
       "vy": 13.461,
       "spin": 0.0076
     },
     {
-      "tick": 1205,
+      "tick": 1128,
       "waveIdx": 2,
       "kind": "normal",
       "size": 3,
-      "x": 174.98,
+      "x": 133.7,
       "y": -83.14,
       "vx": -2.711,
       "vy": 13.531,
       "spin": 0.0077
     },
     {
-      "tick": 1243,
+      "tick": 1166,
       "waveIdx": 3,
       "kind": "normal",
       "size": 1,
@@ -313,7 +313,7 @@
       "spin": 0.0162
     },
     {
-      "tick": 1270,
+      "tick": 1209,
       "waveIdx": 3,
       "kind": "normal",
       "size": 2,
@@ -324,7 +324,7 @@
       "spin": -0.0217
     },
     {
-      "tick": 1320,
+      "tick": 1238,
       "waveIdx": 3,
       "kind": "normal",
       "size": 1,
@@ -335,7 +335,7 @@
       "spin": 0.0018
     },
     {
-      "tick": 1370,
+      "tick": 1288,
       "waveIdx": 3,
       "kind": "sticky",
       "size": 1,
@@ -346,7 +346,7 @@
       "spin": 0.0089
     },
     {
-      "tick": 1428,
+      "tick": 1346,
       "waveIdx": 4,
       "kind": "normal",
       "size": 2,
@@ -357,7 +357,7 @@
       "spin": 0.0348
     },
     {
-      "tick": 1460,
+      "tick": 1378,
       "waveIdx": 4,
       "kind": "normal",
       "size": 2,
@@ -368,7 +368,7 @@
       "spin": 0.0351
     },
     {
-      "tick": 1509,
+      "tick": 1424,
       "waveIdx": 4,
       "kind": "normal",
       "size": 2,
@@ -379,7 +379,7 @@
       "spin": 0.0114
     },
     {
-      "tick": 1572,
+      "tick": 1487,
       "waveIdx": 4,
       "kind": "normal",
       "size": 2,
@@ -390,7 +390,7 @@
       "spin": -0.0072
     },
     {
-      "tick": 1614,
+      "tick": 1546,
       "waveIdx": 4,
       "kind": "normal",
       "size": 2,
@@ -401,7 +401,7 @@
       "spin": 0.0248
     },
     {
-      "tick": 1665,
+      "tick": 1609,
       "waveIdx": 4,
       "kind": "normal",
       "size": 2,
@@ -412,7 +412,7 @@
       "spin": -0.0245
     },
     {
-      "tick": 1728,
+      "tick": 1672,
       "waveIdx": 4,
       "kind": "normal",
       "size": 2,
@@ -423,7 +423,7 @@
       "spin": -0.0173
     },
     {
-      "tick": 1766,
+      "tick": 1730,
       "waveIdx": 4,
       "kind": "normal",
       "size": 2,
@@ -434,7 +434,7 @@
       "spin": 0.0274
     },
     {
-      "tick": 1795,
+      "tick": 1787,
       "waveIdx": 5,
       "kind": "normal",
       "size": 3,
@@ -445,7 +445,7 @@
       "spin": 0.0074
     },
     {
-      "tick": 1845,
+      "tick": 1844,
       "waveIdx": 5,
       "kind": "coin",
       "size": 1,
@@ -456,7 +456,7 @@
       "spin": 0.0077
     },
     {
-      "tick": 1883,
+      "tick": 1899,
       "waveIdx": 5,
       "kind": "normal",
       "size": 2,
@@ -467,7 +467,7 @@
       "spin": 0.0002
     },
     {
-      "tick": 1912,
+      "tick": 1944,
       "waveIdx": 5,
       "kind": "normal",
       "size": 2,
@@ -478,7 +478,7 @@
       "spin": -0.0262
     },
     {
-      "tick": 1964,
+      "tick": 1992,
       "waveIdx": 5,
       "kind": "normal",
       "size": 2,
@@ -489,7 +489,7 @@
       "spin": 0.0224
     },
     {
-      "tick": 2021,
+      "tick": 2049,
       "waveIdx": 5,
       "kind": "normal",
       "size": 3,
@@ -500,7 +500,7 @@
       "spin": 0.0348
     },
     {
-      "tick": 2054,
+      "tick": 2087,
       "waveIdx": 5,
       "kind": "coin",
       "size": 1,
@@ -511,7 +511,7 @@
       "spin": 0.0332
     },
     {
-      "tick": 2083,
+      "tick": 2116,
       "waveIdx": 5,
       "kind": "normal",
       "size": 3,
@@ -522,7 +522,7 @@
       "spin": 0.0053
     },
     {
-      "tick": 2112,
+      "tick": 2145,
       "waveIdx": 5,
       "kind": "coin",
       "size": 1,
@@ -533,7 +533,7 @@
       "spin": -0.0038
     },
     {
-      "tick": 2168,
+      "tick": 2197,
       "waveIdx": 5,
       "kind": "normal",
       "size": 3,
@@ -544,7 +544,7 @@
       "spin": 0.0268
     },
     {
-      "tick": 2200,
+      "tick": 2233,
       "waveIdx": 5,
       "kind": "normal",
       "size": 2,
@@ -555,7 +555,7 @@
       "spin": -0.0288
     },
     {
-      "tick": 2254,
+      "tick": 2262,
       "waveIdx": 5,
       "kind": "normal",
       "size": 2,
@@ -566,7 +566,7 @@
       "spin": 0.0252
     },
     {
-      "tick": 2290,
+      "tick": 2310,
       "waveIdx": 5,
       "kind": "coin",
       "size": 1,
@@ -577,7 +577,7 @@
       "spin": 0.0042
     },
     {
-      "tick": 2347,
+      "tick": 2367,
       "waveIdx": 5,
       "kind": "normal",
       "size": 2,
@@ -588,7 +588,7 @@
       "spin": 0.0017
     },
     {
-      "tick": 2377,
+      "tick": 2403,
       "waveIdx": 5,
       "kind": "normal",
       "size": 2,
@@ -599,7 +599,7 @@
       "spin": 0.0131
     },
     {
-      "tick": 2434,
+      "tick": 2432,
       "waveIdx": 6,
       "kind": "normal",
       "size": 2,
@@ -610,7 +610,7 @@
       "spin": -0.026
     },
     {
-      "tick": 2464,
+      "tick": 2461,
       "waveIdx": 6,
       "kind": "normal",
       "size": 2,
@@ -621,7 +621,7 @@
       "spin": -0.0022
     },
     {
-      "tick": 2493,
+      "tick": 2511,
       "waveIdx": 6,
       "kind": "normal",
       "size": 3,
@@ -632,7 +632,7 @@
       "spin": 0.0001
     },
     {
-      "tick": 2527,
+      "tick": 2568,
       "waveIdx": 6,
       "kind": "normal",
       "size": 3,
@@ -643,7 +643,7 @@
       "spin": -0.0359
     },
     {
-      "tick": 2581,
+      "tick": 2606,
       "waveIdx": 6,
       "kind": "normal",
       "size": 2,
@@ -654,7 +654,7 @@
       "spin": -0.0251
     },
     {
-      "tick": 2616,
+      "tick": 2659,
       "waveIdx": 6,
       "kind": "normal",
       "size": 3,
@@ -665,7 +665,7 @@
       "spin": -0.001
     },
     {
-      "tick": 2669,
+      "tick": 2694,
       "waveIdx": 6,
       "kind": "normal",
       "size": 2,
@@ -676,7 +676,7 @@
       "spin": -0.0359
     },
     {
-      "tick": 2706,
+      "tick": 2749,
       "waveIdx": 6,
       "kind": "normal",
       "size": 3,
@@ -687,7 +687,7 @@
       "spin": -0.0157
     },
     {
-      "tick": 2763,
+      "tick": 2782,
       "waveIdx": 6,
       "kind": "normal",
       "size": 3,
@@ -698,7 +698,7 @@
       "spin": -0.0166
     },
     {
-      "tick": 2820,
+      "tick": 2834,
       "waveIdx": 6,
       "kind": "normal",
       "size": 3,
@@ -709,7 +709,7 @@
       "spin": -0.033
     },
     {
-      "tick": 2870,
+      "tick": 2897,
       "waveIdx": 7,
       "kind": "normal",
       "size": 2,
@@ -720,7 +720,7 @@
       "spin": -0.0375
     },
     {
-      "tick": 2919,
+      "tick": 2953,
       "waveIdx": 7,
       "kind": "normal",
       "size": 2,
@@ -731,7 +731,7 @@
       "spin": 0.0323
     },
     {
-      "tick": 2964,
+      "tick": 3014,
       "waveIdx": 7,
       "kind": "normal",
       "size": 2,
@@ -742,7 +742,7 @@
       "spin": -0.0254
     },
     {
-      "tick": 3019,
+      "tick": 3073,
       "waveIdx": 7,
       "kind": "normal",
       "size": 2,
@@ -753,7 +753,7 @@
       "spin": -0.0221
     },
     {
-      "tick": 3058,
+      "tick": 3132,
       "waveIdx": 7,
       "kind": "normal",
       "size": 2,
@@ -764,7 +764,7 @@
       "spin": 0.0128
     },
     {
-      "tick": 3117,
+      "tick": 3195,
       "waveIdx": 7,
       "kind": "normal",
       "size": 2,
@@ -775,7 +775,7 @@
       "spin": -0.004
     },
     {
-      "tick": 3180,
+      "tick": 3258,
       "waveIdx": 7,
       "kind": "normal",
       "size": 2,
@@ -786,7 +786,7 @@
       "spin": -0.0345
     },
     {
-      "tick": 3223,
+      "tick": 3321,
       "waveIdx": 7,
       "kind": "normal",
       "size": 2,

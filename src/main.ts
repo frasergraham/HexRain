@@ -2,7 +2,12 @@ import "./style.css";
 import { preloadSfx } from "./audio";
 import { App } from "@capacitor/app";
 import { Game } from "./game";
-import { pullOfficialOverrides, pullProgressDown, subscribeToInstalledUpdates } from "./cloudSync";
+import {
+  pullEndlessBalanceConfig,
+  pullOfficialOverrides,
+  pullProgressDown,
+  subscribeToInstalledUpdates,
+} from "./cloudSync";
 import { reconcileBakedOverrides } from "./officialOverrides";
 
 // First thing on boot: drop any locally-cached overrides whose content
@@ -72,6 +77,7 @@ void (async () => {
   await Promise.all([
     pullProgressDown().then(() => game.refreshChallengeSelectIfOpen()),
     pullOfficialOverrides().then(() => game.refreshChallengeSelectIfOpen()),
+    pullEndlessBalanceConfig(),
   ]);
   await subscribeToInstalledUpdates();
 })();

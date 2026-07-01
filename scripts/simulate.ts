@@ -7,6 +7,21 @@
 //   tsx scripts/simulate.ts --audit               tier-share audit only (no run loops)
 //   tsx scripts/simulate.ts --json out.json       emit raw stats as JSON for diffing
 //   tsx scripts/simulate.ts --diff base.json proposed.json
+//   tsx scripts/simulate.ts --config tweak.json   apply override JSON to all runs
+//
+// --config JSON shape (every field optional):
+//   {
+//     "global":       { ...Partial<GlobalEndlessTunables> },
+//     "byDifficulty": {
+//       "easy":     { ...Partial<DifficultyConfig> },
+//       "medium":   { ... },
+//       "hard":     { ... },
+//       "hardcore": { ... }
+//     }
+//   }
+// global applies to all difficulties; byDifficulty.<d> is merged on top
+// of the matching baked default. Useful for previewing a CloudKit
+// EndlessBalanceOverride payload before pushing it live.
 //
 // LIMITATION: encounter-level model, not physics. Trust *relative* score
 // deltas between configs more than absolute scores. Calibrate skill
@@ -16,12 +31,14 @@
 import { writeFileSync, readFileSync } from "node:fs";
 import type { Difficulty } from "../src/types";
 import {
-  DIFFICULTY_CONFIG,
-  pickKind,
-  SPAWN_CHALLENGE_TIER_WEIGHT,
-  SPAWN_HELPFUL_TIER_WEIGHT,
-  SPAWN_STICKY_TIER_WEIGHT,
+  type DifficultyConfig,
+  pickKindWithWeights,
 } from "../src/spawnKind";
+import {
+  type GlobalEndlessTunables,
+  type EndlessBalanceSnapshot,
+  snapshotFromOverrides,
+} from "../src/endlessBalance";
 import { mulberry32 } from "../src/rng";
 import { CHALLENGES } from "../src/challenges";
 import { SKILLS } from "../src/sim/skills";
@@ -36,6 +53,11 @@ import {
 } from "../src/sim/aggregate";
 import type { RunResult } from "../src/sim/types";
 
+interface ConfigOverride {
+  global: Partial<GlobalEndlessTunables>;
+  byDifficulty: Partial<Record<Difficulty, Partial<DifficultyConfig>>>;
+}
+
 interface Args {
   n: number;
   seed: number;
@@ -43,6 +65,7 @@ interface Args {
   audit: boolean;
   json: string | null;
   diff: { baseline: string; proposed: string } | null;
+  config: string | null;
 }
 
 function parseArgs(argv: ReadonlyArray<string>): Args {
@@ -53,6 +76,7 @@ function parseArgs(argv: ReadonlyArray<string>): Args {
     audit: false,
     json: null,
     diff: null,
+    config: null,
   };
   const requireInt = (flag: string, raw: string | undefined): number => {
     if (raw === undefined) throw new Error(`${flag} requires a numeric argument`);
@@ -77,6 +101,7 @@ function parseArgs(argv: ReadonlyArray<string>): Args {
     } else if (a === "--challenges") args.challenges = true;
     else if (a === "--audit") args.audit = true;
     else if (a === "--json") args.json = requirePath(a, argv[++i]);
+    else if (a === "--config") args.config = requirePath(a, argv[++i]);
     else if (a === "--diff") {
       args.diff = {
         baseline: requirePath(a, argv[++i]),
@@ -87,19 +112,63 @@ function parseArgs(argv: ReadonlyArray<string>): Args {
   return args;
 }
 
-function auditTierShares(): void {
+const DIFFICULTIES: ReadonlyArray<Difficulty> = ["easy", "medium", "hard", "hardcore"];
+
+function loadConfigOverride(path: string): ConfigOverride {
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (err) {
+    throw new Error(`Could not read --config file ${path}: ${(err as Error).message}`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(`Could not parse --config JSON from ${path}: ${(err as Error).message}`);
+  }
+  if (!parsed || typeof parsed !== "object") {
+    throw new Error(`--config file ${path} must contain a JSON object`);
+  }
+  const obj = parsed as { global?: unknown; byDifficulty?: unknown };
+  const out: ConfigOverride = { global: {}, byDifficulty: {} };
+  if (obj.global && typeof obj.global === "object") {
+    out.global = obj.global as Partial<GlobalEndlessTunables>;
+  }
+  if (obj.byDifficulty && typeof obj.byDifficulty === "object") {
+    const bd = obj.byDifficulty as Record<string, unknown>;
+    for (const d of DIFFICULTIES) {
+      const entry = bd[d];
+      if (entry && typeof entry === "object") {
+        out.byDifficulty[d] = entry as Partial<DifficultyConfig>;
+      }
+    }
+  }
+  return out;
+}
+
+function snapshotFor(d: Difficulty, override: ConfigOverride | null): EndlessBalanceSnapshot {
+  return snapshotFromOverrides(
+    d,
+    override?.byDifficulty[d] ?? {},
+    override?.global ?? {},
+  );
+}
+
+function auditTierShares(override: ConfigOverride | null): void {
   const N = 100_000;
   const score = 400; // late-game, all kinds eligible
   console.log("# Tier-share audit");
   console.log(`Sampling pickKind ${N.toLocaleString()} times at score=${score}.\n`);
+  if (override) console.log(`(applying override: ${describeOverride(override)})\n`);
   console.log("| difficulty | sticky | helpful | challenge | normal |");
   console.log("|---|---:|---:|---:|---:|");
-  for (const d of ["easy", "medium", "hard", "hardcore"] as const) {
-    const cfg = DIFFICULTY_CONFIG[d];
+  for (const d of DIFFICULTIES) {
+    const snap = snapshotFor(d, override);
     const counts = { sticky: 0, coin: 0, slow: 0, fast: 0, big: 0, shield: 0, drone: 0, tiny: 0, normal: 0 };
     const rng = mulberry32(0x12345678);
     for (let i = 0; i < N; i++) {
-      const k = pickKind(cfg, score, rng);
+      const k = pickKindWithWeights(snap.config, score, rng, snap.tierWeights);
       counts[k] += 1;
     }
     const sticky = counts.sticky;
@@ -109,30 +178,45 @@ function auditTierShares(): void {
     const f = (n: number) => `${((n / N) * 100).toFixed(1)}%`;
     console.log(`| ${d} | ${f(sticky)} | ${f(helpful)} | ${f(challenge)} | ${f(normal)} |`);
   }
-  // Expected (from CLAUDE.md):
-  // - 0.10 × stickyMul, 0.19 × helpfulMul, 0.05 × challengeMul, rest = normal.
-  console.log("\n## Expected (from DIFFICULTY_CONFIG multipliers)");
+  // Expected from the effective snapshot (config × tier weights), not the
+  // baked module constants — so --config previews compare against the
+  // override target rather than the default.
+  console.log("\n## Expected (from effective snapshot)");
   console.log("| difficulty | sticky | helpful | challenge | normal |");
   console.log("|---|---:|---:|---:|---:|");
-  for (const d of ["easy", "medium", "hard", "hardcore"] as const) {
-    const cfg = DIFFICULTY_CONFIG[d];
-    const sticky = SPAWN_STICKY_TIER_WEIGHT * cfg.stickyMul;
-    const helpful = SPAWN_HELPFUL_TIER_WEIGHT * cfg.helpfulMul;
-    const challenge = SPAWN_CHALLENGE_TIER_WEIGHT * cfg.challengeMul;
+  for (const d of DIFFICULTIES) {
+    const snap = snapshotFor(d, override);
+    const sticky = snap.tierWeights.sticky * snap.config.stickyMul;
+    const helpful = snap.tierWeights.helpful * snap.config.helpfulMul;
+    const challenge = snap.tierWeights.challenge * snap.config.challengeMul;
     const normal = 1 - sticky - helpful - challenge;
     const f = (n: number) => `${(n * 100).toFixed(1)}%`;
     console.log(`| ${d} | ${f(sticky)} | ${f(helpful)} | ${f(challenge)} | ${f(normal)} |`);
   }
 }
 
-function runEndlessGrid(N: number, seed0: number): CellStats[] {
+function describeOverride(override: ConfigOverride): string {
+  const parts: string[] = [];
+  const globalKeys = Object.keys(override.global);
+  if (globalKeys.length > 0) parts.push(`global { ${globalKeys.join(", ")} }`);
+  for (const d of DIFFICULTIES) {
+    const partial = override.byDifficulty[d];
+    if (partial && Object.keys(partial).length > 0) {
+      parts.push(`${d} { ${Object.keys(partial).join(", ")} }`);
+    }
+  }
+  return parts.length > 0 ? parts.join("; ") : "(no fields set)";
+}
+
+function runEndlessGrid(N: number, seed0: number, override: ConfigOverride | null): CellStats[] {
   const cells: CellStats[] = [];
-  for (const d of ["easy", "medium", "hard", "hardcore"] as const) {
+  for (const d of DIFFICULTIES) {
+    const snap = snapshotFor(d, override);
     for (const skill of SKILLS) {
       const results: RunResult[] = [];
       for (let i = 0; i < N; i++) {
         const seed = (seed0 ^ hashCell(d, skill.name, i)) >>> 0;
-        results.push(runEndless(d, skill, seed));
+        results.push(runEndless(d, skill, seed, snap));
       }
       cells.push(summarize(d, skill.name, results));
     }
@@ -171,6 +255,9 @@ function hashCell(a: string, b: string, i: number): number {
 
 function main(argv: ReadonlyArray<string>): void {
   const args = parseArgs(argv);
+  const override: ConfigOverride | null = args.config !== null
+    ? loadConfigOverride(args.config)
+    : null;
 
   if (args.diff !== null) {
     const loadCells = (path: string, label: string): CellStats[] => {
@@ -193,15 +280,16 @@ function main(argv: ReadonlyArray<string>): void {
   }
 
   if (args.audit) {
-    auditTierShares();
+    auditTierShares(override);
     return;
   }
 
   const t0 = Date.now();
-  const endless = runEndlessGrid(args.n, args.seed);
+  const endless = runEndlessGrid(args.n, args.seed, override);
   const dt = ((Date.now() - t0) / 1000).toFixed(2);
 
-  console.log(`# Endless mode (N=${args.n}, seed=${args.seed}, ${dt}s)\n`);
+  const overrideTag = override ? ` config=${args.config}` : "";
+  console.log(`# Endless mode (N=${args.n}, seed=${args.seed},${overrideTag} ${dt}s)\n`);
   console.log(formatTable(endless));
 
   let challenge: CellStats[] = [];

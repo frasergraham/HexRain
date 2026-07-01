@@ -67,7 +67,11 @@ describe("runEndless", () => {
     expect(b.score === a.score && b.durationSec === a.durationSec).toBe(false);
   });
 
-  it("respects difficulty monotonicity at fixed skill (medians)", () => {
+  it("respects difficulty monotonicity at fixed skill (casual medians)", () => {
+    // After the 2026-05 rebalance softening, easy > medium > hard >
+    // hardcore holds cleanly at every skill profile. We use "casual"
+    // because it's the realistic median player, but novice / skilled /
+    // expert all produce the same ordering under the new values.
     const skill = SKILLS.find((s) => s.name === "casual")!;
     const N = 80;
     const median = (results: number[]): number => {
@@ -80,9 +84,9 @@ describe("runEndless", () => {
         samples[d].push(runEndless(d, skill, 100 + i).score);
       }
     }
-    expect(median(samples.easy)).toBeGreaterThanOrEqual(median(samples.medium));
-    expect(median(samples.medium)).toBeGreaterThanOrEqual(median(samples.hard));
-    expect(median(samples.hard)).toBeGreaterThanOrEqual(median(samples.hardcore) - 5);
+    expect(median(samples.easy)).toBeGreaterThan(median(samples.medium));
+    expect(median(samples.medium)).toBeGreaterThan(median(samples.hard));
+    expect(median(samples.hard)).toBeGreaterThan(median(samples.hardcore));
   });
 });
 
